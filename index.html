@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>台股個股健診升級版</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0e1a; --bg2:#111827; --card:#1a2035; --card2:#1e293b;
+  --border:#2d3748; --text:#e2e8f0; --text-dim:#94a3b8;
+  --red:#ef4444; --red-bg:rgba(239,68,68,.12); --green:#22c55e; --green-bg:rgba(34,197,94,.12);
+  --yellow:#eab308; --orange:#f97316; --blue:#3b82f6; --purple:#a855f7;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.mono{font-family:'Roboto Mono',monospace}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* Header */
+.header{background:linear-gradient(135deg,#0a0e1a 0%,#1a2035 100%);border-bottom:1px solid var(--border);padding:20px 24px}
+.header-top{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.header h1{font-family:'Noto Serif TC',serif;font-size:1.6rem;font-weight:700;color:#fff;white-space:nowrap}
+.stock-info{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.stock-id{font-family:'Roboto Mono',monospace;font-size:1.1rem;color:var(--blue);font-weight:700}
+.stock-name{font-size:1.2rem;font-weight:700;color:#fff}
+.report-time{margin-left:auto;font-size:.85rem;color:var(--text-dim);font-family:'Roboto Mono',monospace}
+
+/* Search bar */
+.search-bar{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
+.search-bar input{flex:1;min-width:200px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.95rem;font-family:'Roboto Mono',monospace}
+.search-bar input:focus{outline:none;border-color:var(--blue)}
+.search-bar input::placeholder{color:var(--text-dim)}
+.btn{padding:10px 20px;border:none;border-radius:8px;font-size:.95rem;font-weight:500;cursor:pointer;transition:all .2s;font-family:'Noto Sans TC',sans-serif}
+.btn-primary{background:var(--blue);color:#fff}
+.btn-primary:hover{background:#2563eb}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+
+/* Grid */
+.container{max-width:1400px;margin:0 auto;padding:20px 24px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+@media(max-width:768px){.grid{grid-template-columns:1fr}}
+
+/* Card */
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;overflow:hidden}
+.card-title{font-size:1rem;font-weight:700;color:#fff;margin-bottom:12px;display:flex;align-items:center;gap:8px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.card-title .icon{font-size:1.2rem}
+.card-body{font-size:.9rem;line-height:1.6}
+
+/* Loading */
+.loading{display:flex;align-items:center;justify-content:center;padding:40px;gap:10px;color:var(--text-dim)}
+.spinner{width:24px;height:24px;border:3px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Table */
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th{text-align:left;padding:6px 8px;color:var(--text-dim);font-weight:500;border-bottom:1px solid var(--border)}
+td{padding:6px 8px;border-bottom:1px solid rgba(45,55,72,.4)}
+tr:last-child td{border-bottom:none}
+
+/* Indicators */
+.indicator-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(45,55,72,.3)}
+.indicator-row:last-child{border-bottom:none}
+.ind-label{color:var(--text-dim);font-size:.85rem}
+.ind-value{font-family:'Roboto Mono',monospace;font-weight:500}
+.pos{color:var(--red)} .neg{color:var(--green)} .neutral{color:var(--yellow)}
+
+/* Score badge */
+.score-badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:.8rem;font-weight:700;font-family:'Roboto Mono',monospace}
+.score-pos{background:var(--red-bg);color:var(--red)}
+.score-neg{background:var(--green-bg);color:var(--green)}
+.score-neu{background:rgba(234,179,8,.12);color:var(--yellow)}
+
+/* Verdict */
+.verdict-box{background:var(--card2);border:2px solid var(--border);border-radius:12px;padding:20px;text-align:center;margin-bottom:16px}
+.verdict-label{font-size:1.8rem;font-weight:700;font-family:'Noto Serif TC',serif}
+.verdict-buy{color:var(--green);border-color:var(--green)}
+.verdict-watch{color:var(--yellow);border-color:var(--yellow)}
+.verdict-reduce{color:var(--orange);border-color:var(--orange)}
+.verdict-sell{color:var(--red);border-color:var(--red)}
+.verdict-score{font-family:'Roboto Mono',monospace;font-size:1.1rem;margin-top:8px;color:var(--text-dim)}
+.price-points{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}
+@media(max-width:768px){.price-points{grid-template-columns:1fr}}
+.price-point{background:var(--card);border-radius:8px;padding:12px;text-align:center}
+.price-point .label{font-size:.8rem;color:var(--text-dim);margin-bottom:4px}
+.price-point .value{font-family:'Roboto Mono',monospace;font-size:1.2rem;font-weight:700}
+.reasons{text-align:left;margin-top:16px}
+.reasons li{padding:4px 0;font-size:.9rem;color:var(--text-dim)}
+.reasons li::marker{color:var(--blue)}
+
+/* News */
+.news-item{padding:10px 0;border-bottom:1px solid rgba(45,55,72,.4)}
+.news-item:last-child{border-bottom:none}
+.news-title{font-size:.9rem;font-weight:500;margin-bottom:4px}
+.news-meta{font-size:.78rem;color:var(--text-dim);display:flex;gap:8px;align-items:center}
+.news-tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.72rem;font-weight:700}
+.tag-pos{background:var(--red-bg);color:var(--red)}
+.tag-neg{background:var(--green-bg);color:var(--green)}
+.tag-neu{background:rgba(148,163,184,.12);color:var(--text-dim)}
+
+/* Sector flow */
+.sector-item{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-radius:6px;margin-bottom:4px;font-size:.85rem}
+.sector-buy{background:var(--red-bg)}
+.sector-sell{background:var(--green-bg)}
+.sector-name{font-weight:500}
+.sector-val{font-family:'Roboto Mono',monospace;font-weight:700}
+
+/* US market */
+.us-item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(45,55,72,.4)}
+.us-item:last-child{border-bottom:none}
+.us-name{font-size:.9rem;color:var(--text-dim)}
+.us-close{font-family:'Roboto Mono',monospace;font-weight:500}
+.us-change{font-family:'Roboto Mono',monospace;font-size:.85rem}
+.us-mood{text-align:center;margin-top:12px;padding:10px;border-radius:8px;font-size:.9rem;font-weight:500}
+
+/* Error */
+.error-msg{color:var(--red);font-size:.85rem;padding:8px 0}
+.placeholder{text-align:center;padding:30px;color:var(--text-dim);font-size:.9rem}
+</style>
+</head>
+<body>
+
+<!-- ===================== HEADER ===================== -->
+<div class="header">
+  <div class="header-top">
+    <h1>📊 台股個股健診升級版</h1>
+    <div class="report-time" id="reportTime"></div>
+  </div>
+  <div class="search-bar">
+    <input type="text" id="stockInput" placeholder="輸入股票代號（如 2308）或名稱..." onkeypress="if(event.key==='Enter')doSearch()">
+    <button class="btn btn-primary" id="searchBtn" onclick="doSearch()">健診</button>
+  </div>
+</div>
+
+<!-- ===================== MAIN ===================== -->
+<div class="container">
+<div class="grid">
+
+  <!-- ===== 技術面 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">📈</span>技術面分析</div>
+    <div class="card-body" id="techBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+  <!-- ===== 基本面 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">📋</span>基本面分析</div>
+    <div class="card-body" id="fundBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+  <!-- ===== 籌碼面 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">💰</span>籌碼面分析</div>
+    <div class="card-body" id="chipBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+  <!-- ===== 法人族群流向 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">🏭</span>法人族群流向</div>
+    <div class="card-body" id="sectorBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+  <!-- ===== 法人買賣超排行 TOP10 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">🏆</span>法人買賣超排行 TOP10</div>
+    <div class="card-body" id="topInstBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+  <!-- ===== 美股概況 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">🇺🇸</span>美股概況</div>
+    <div class="card-body" id="usBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+  <!-- ===== 今日新聞 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">📰</span>今日新聞</div>
+    <div class="card-body" id="newsBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+</div><!-- /grid -->
+
+<!-- ===== AI 綜合操作建議 ===== -->
+<div class="card" style="margin-top:16px">
+  <div class="card-title"><span class="icon">🤖</span>AI 綜合操作建議</div>
+  <div class="card-body" id="verdictBody">
+    <div class="placeholder">輸入股票代號開始健診</div>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<script>
+// ===========================================================================
+// 全域狀態
+// ===========================================================================
+var G = {
+  stockId: '',
+  stockName: '',
+  industry: '',
+  prices: [],        // [{date, open, max, min, close, Trading_Volume}, ...]
+  scores: { tech:0, fund:0, chip:0, us:0, total:0 },
+  techData: null,
+  fundData: null,
+  chipData: null,
+  usData: null,
+  newsData: null,
+  sectorData: null,
+};
+
+// ===========================================================================
+// 工具函式
+// ===========================================================================
+function fmt(n, d) {
+  d = d === undefined ? 2 : d;
+  if (n === null || n === undefined || isNaN(n)) return '--';
+  return Number(n).toLocaleString('zh-TW', {minimumFractionDigits:d, maximumFractionDigits:d});
+}
+function fmtInt(n) {
+  if (n === null || n === undefined || isNaN(n)) return '--';
+  return Number(n).toLocaleString('zh-TW');
+}
+function colorVal(n) {
+  if (n > 0) return 'pos';
+  if (n < 0) return 'neg';
+  return 'neutral';
+}
+function scoreBadge(s) {
+  var cls = s > 0 ? 'score-pos' : (s < 0 ? 'score-neg' : 'score-neu');
+  var sign = s > 0 ? '+' : '';
+  return '<span class="score-badge ' + cls + '">' + sign + s + '</span>';
+}
+function loadingHtml(msg) {
+  return '<div class="loading"><div class="spinner"></div><span>' + (msg||'載入中...') + '</span></div>';
+}
+function errHtml(msg) {
+  return '<div class="error-msg">⚠ ' + msg + '</div>';
+}
+
+// ===========================================================================
+// FinMind API 代理呼叫
+// ===========================================================================
+function fetchFinMind(dataset, dataId, startDate, endDate) {
+  var url = '/api/data?dataset=' + encodeURIComponent(dataset);
+  if (dataId) url += '&data_id=' + encodeURIComponent(dataId);
+  if (startDate) url += '&start_date=' + encodeURIComponent(startDate);
+  if (endDate) url += '&end_date=' + encodeURIComponent(endDate);
+  return fetch(url).then(function(r){ return r.json(); });
+}
+
+// ===========================================================================
+// 技術指標計算 — 已移至後端 /api/stock（pandas 計算，BB 用 ddof=0）
+// 前端不再重複計算 KD/MACD/布林通道，直接使用後端回傳結果
+// ===========================================================================
+
+// ===========================================================================
+// 主搜尋流程
+// ===========================================================================
+function doSearch() {
+  var input = document.getElementById('stockInput').value.trim();
+  if (!input) return;
+  document.getElementById('searchBtn').disabled = true;
+  document.getElementById('reportTime').textContent = '';
+
+  // 重設
+  G = {
+    stockId: '', stockName: '', industry: '',
+    prices: [], scores: { tech:0, fund:0, chip:0, us:0, total:0 },
+    techData: null, fundData: null, chipData: null,
+    usData: null, newsData: null, sectorData: null,
+  };
+
+  // 顯示 loading
+  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody'];
+  bodies.forEach(function(id){
+    document.getElementById(id).innerHTML = loadingHtml('載入中...');
+  });
+
+  // 判斷輸入是代號還是名稱
+  var isNum = /^\d{4,5}$/.test(input);
+  G.stockId = isNum ? input : '';
+  G.stockName = isNum ? '' : input;
+
+  var now = new Date();
+  document.getElementById('reportTime').textContent =
+    '產出時間：' + now.toLocaleString('zh-TW');
+
+  // Step 1: 如果是名稱，先查 TaiwanStockInfo 找代號
+  // 如果是數字代號，跳過此步驟，/api/stock 會回傳 name/industry
+  var infoPromise;
+  if (isNum) {
+    infoPromise = Promise.resolve();
+  } else {
+    infoPromise = fetchFinMind('TaiwanStockInfo').then(function(j){
+      var d = j.data || [];
+      for (var i = 0; i < d.length; i++) {
+        if (d[i].stock_name && d[i].stock_name.indexOf(input) >= 0) {
+          G.stockId = d[i].stock_id;
+          G.stockName = d[i].stock_name;
+          G.industry = d[i].industry_category || '';
+          break;
+        }
+      }
+      if (!G.stockId) {
+        throw new Error('找不到股票名稱：' + input);
+      }
+    });
+  }
+
+  infoPromise.then(function(){
+    // 並行抓取所有資料（fetchTechData 會從 /api/stock 補填 name/industry）
+    return Promise.all([
+      fetchTechData(),
+      fetchFundData(),
+      fetchChipData(),
+      fetchSectorFlow(),
+      fetchTopInstitutional(),
+      fetchUSMarket(),
+      fetchNews()
+    ]);
+  }).then(function(){
+    // 資料載入完成後更新 header（name/industry 可能來自 /api/stock）
+    var infoHtml = '<span class="stock-id">' + G.stockId + '</span>';
+    if (G.stockName) infoHtml += '<span class="stock-name">' + G.stockName + '</span>';
+    if (G.industry) infoHtml += '<span style="color:var(--text-dim);font-size:.9rem">｜' + G.industry + '</span>';
+    document.querySelector('.header-top').insertAdjacentHTML('afterbegin',
+      '<div class="stock-info" id="stockInfo">' + infoHtml + '</div>');
+    renderAll();
+  }).catch(function(err){
+    bodies.forEach(function(id){
+      var el = document.getElementById(id);
+      if (el.innerHTML.indexOf('spinner') >= 0) {
+        el.innerHTML = errHtml(err.message || '載入失敗');
+      }
+    });
+  }).then(function(){
+    document.getElementById('searchBtn').disabled = false;
+  });
+}
+
+// ===========================================================================
+// 資料抓取
+// ===========================================================================
+
+// --- 技術面：改呼叫後端 /api/stock（pandas 計算指標）---
+function fetchTechData() {
+  return fetch('/api/stock?symbol=' + encodeURIComponent(G.stockId))
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if (j.status !== 200 && j.error) {
+        throw new Error(j.error || j.msg || '取得技術面資料失敗');
+      }
+      // 如果後端有回傳 name/industry，補填
+      if (j.name && !G.stockName) G.stockName = j.name;
+      if (j.industry && !G.industry) G.industry = j.industry;
+      // 映射後端回傳格式 → 前端 G.techData 結構
+      G.techData = {
+        lastClose: j.close,
+        lastDate: j.date,
+        ma5: j.ma.MA5, ma10: j.ma.MA10, ma20: j.ma.MA20, ma60: j.ma.MA60,
+        kd: { k: j.kd.K, d: j.kd.D, cross: j.kd.cross },
+        macd: { dif: j.macd.DIF, dea: j.macd.DEA, hist: j.macd.Hist, dir: j.macd.dir, trend: j.macd.trend },
+        bb: { upper: j.bb.Upper, mid: j.bb.Middle, lower: j.bb.Lower, pos: j.bb.pos },
+        vol: { last: j.vol.last, avg5: j.vol.avg5, ratio: j.vol.ratio },
+        recentHigh: j.recent.high, recentLow: j.recent.low,
+        buy: { low: j.trade_points.buy_low, high: j.trade_points.buy_high },
+        sell: { low: j.trade_points.sell_low, high: j.trade_points.sell_high },
+        stopLoss: j.trade_points.stop_loss,
+        score: j.score
+      };
+    });
+}
+
+// --- 基本面：營收、PER/PBR ---
+function fetchFundData() {
+  var end = new Date();
+  var start = new Date();
+  start.setFullYear(start.getFullYear() - 1);
+  var sd = start.toISOString().slice(0,10);
+  var ed = end.toISOString().slice(0,10);
+  var p1 = fetchFinMind('TaiwanStockMonthRevenue', G.stockId, sd, ed);
+  var p2 = fetchFinMind('TaiwanStockStockDividend', G.stockId, sd, ed);
+  return Promise.all([p1, p2]).then(function(results){
+    G.fundData = {
+      revenue: results[0].data || [],
+      dividend: results[1].data || [],
+    };
+  }).catch(function(){ G.fundData = { revenue: [], dividend: [] }; });
+}
+
+// --- 籌碼面：法人買賣超、融資 ---
+function fetchChipData() {
+  var end = new Date();
+  var start = new Date();
+  start.setMonth(start.getMonth() - 1);
+  var sd = start.toISOString().slice(0,10);
+  var ed = end.toISOString().slice(0,10);
+  var p1 = fetchFinMind('TaiwanStockInstitutionalInvestorsBuySell', G.stockId, sd, ed);
+  var p2 = fetchFinMind('TaiwanStockMarginPurchaseShortSale', G.stockId, sd, ed);
+  return Promise.all([p1, p2]).then(function(results){
+    G.chipData = {
+      inst: results[0].data || [],
+      margin: results[1].data || [],
+    };
+  }).catch(function(){ G.chipData = { inst: [], margin: [] }; });
+}
+
+// --- 法人族群流向 ---
+function fetchSectorFlow() {
+  return fetch('/api/sector_flow').then(function(r){ return r.json(); }).then(function(j){
+    G.sectorData = j;
+  }).catch(function(){ G.sectorData = null; });
+}
+
+// --- 美股 ---
+function fetchUSMarket() {
+  return fetch('/api/us_market').then(function(r){ return r.json(); }).then(function(j){
+    G.usData = j;
+  }).catch(function(){ G.usData = null; });
+}
+
+// --- 法人買賣超排行 TOP10 ---
+function fetchTopInstitutional() {
+  return fetch('/api/top_institutional').then(function(r){ return r.json(); }).then(function(j){
+    G.topInstData = j;
+  }).catch(function(){ G.topInstData = null; });
+}
+
+// --- 新聞 ---
+function fetchNews() {
+  var q = G.stockName || G.stockId;
+  return fetch('/api/news?q=' + encodeURIComponent(q)).then(function(r){ return r.json(); }).then(function(j){
+    G.newsData = j;
+  }).catch(function(){ G.newsData = null; });
+}
+
+// ===========================================================================
+// 技術面計算 — 已移至後端 /api/stock，前端直接使用回傳結果
+// ===========================================================================
+
+// ===========================================================================
+// 渲染：全部
+// ===========================================================================
+function renderAll() {
+  renderTech();
+  renderFund();
+  renderChip();
+  renderSector();
+  renderTopInst();
+  renderUS();
+  renderNews();
+  renderVerdict();
+}
+
+// --- 技術面 ---
+function renderTech() {
+  var el = document.getElementById('techBody');
+  var t = G.techData;
+  if (!t) { el.innerHTML = errHtml('股價資料不足（需至少 26 筆）'); return; }
+
+  G.scores.tech = t.score;
+
+  var html = '<table style="margin-bottom:12px">';
+  html += '<tr><th>日期</th><td class="mono">' + t.lastDate + '</td></tr>';
+  html += '<tr><th>收盤價</th><td class="mono pos">' + fmt(t.lastClose) + '</td></tr>';
+  html += '<tr><th>MA5</th><td class="mono">' + fmt(t.ma5) + '</td></tr>';
+  html += '<tr><th>MA10</th><td class="mono">' + fmt(t.ma10) + '</td></tr>';
+  html += '<tr><th>MA20</th><td class="mono">' + fmt(t.ma20) + '</td></tr>';
+  if (t.ma60 !== null) html += '<tr><th>MA60</th><td class="mono">' + fmt(t.ma60) + '</td></tr>';
+  html += '</table>';
+
+  // KD
+  html += '<div class="indicator-row"><span class="ind-label">KD(9,3,3) K值</span><span class="ind-value ' + (t.kd.k > 50 ? 'pos' : 'neg') + '">' + fmt(t.kd.k, 1) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">KD(9,3,3) D值</span><span class="ind-value ' + (t.kd.d > 50 ? 'pos' : 'neg') + '">' + fmt(t.kd.d, 1) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">KD 交叉</span><span class="ind-value ' + (t.kd.cross.indexOf('黃金') >= 0 || t.kd.cross.indexOf('偏多') >= 0 ? 'pos' : 'neg') + '">' + t.kd.cross + '</span></div>';
+
+  // MACD
+  html += '<div class="indicator-row"><span class="ind-label">MACD DIF</span><span class="ind-value ' + (t.macd.dif > 0 ? 'pos' : 'neg') + '">' + fmt(t.macd.dif) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">MACD 訊號線 DEA</span><span class="ind-value ' + (t.macd.dea > 0 ? 'pos' : 'neg') + '">' + fmt(t.macd.dea) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">柱狀圖方向</span><span class="ind-value ' + (t.macd.hist > 0 ? 'pos' : 'neg') + '">' + t.macd.dir + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">柱狀圖趨勢</span><span class="ind-value neutral">' + t.macd.trend + '</span></div>';
+
+  // 布林
+  html += '<div class="indicator-row"><span class="ind-label">布林上軌</span><span class="ind-value">' + fmt(t.bb.upper) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">布林中軌</span><span class="ind-value">' + fmt(t.bb.mid) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">布林下軌</span><span class="ind-value">' + fmt(t.bb.lower) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">價格位置</span><span class="ind-value neutral">' + t.bb.pos + '</span></div>';
+
+  // 量能
+  html += '<div class="indicator-row"><span class="ind-label">今日成交量</span><span class="ind-value mono">' + fmtInt(t.vol.last) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">5日均量</span><span class="ind-value mono">' + fmtInt(t.vol.avg5) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">量比</span><span class="ind-value ' + (t.vol.ratio > 1.5 ? 'pos' : (t.vol.ratio < 0.5 ? 'neg' : 'neutral')) + '">' + fmt(t.vol.ratio, 2) + '</span></div>';
+
+  // 買賣點
+  html += '<div class="indicator-row"><span class="ind-label">🟢 建議買進區間</span><span class="ind-value pos">' + fmt(t.buy.low) + ' ~ ' + fmt(t.buy.high) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">🔴 建議賣出區間</span><span class="ind-value neg">' + fmt(t.sell.low) + ' ~ ' + fmt(t.sell.high) + '</span></div>';
+  html += '<div class="indicator-row"><span class="ind-label">🛑 建議停損點</span><span class="ind-value neg">' + fmt(t.stopLoss) + '</span></div>';
+
+  html += '<div style="margin-top:8px">技術面評分 ' + scoreBadge(t.score) + '</div>';
+
+  el.innerHTML = html;
+}
+
+// --- 基本面 ---
+function renderFund() {
+  var el = document.getElementById('fundBody');
+  var d = G.fundData;
+  if (!d || (!d.revenue.length && !d.dividend.length)) {
+    el.innerHTML = '<div class="placeholder">無基本面資料</div>';
+    return;
+  }
+
+  var score = 0;
+  var html = '';
+
+  // 營收
+  if (d.revenue.length > 0) {
+    var revs = d.revenue;
+    var latest = revs[revs.length - 1];
+    var prev = revs.length > 1 ? revs[revs.length - 2] : null;
+    var yoy = null;
+    if (revs.length >= 13) {
+      var lastYear = revs[revs.length - 13];
+      if (lastYear && lastYear.revenue) {
+        yoy = (latest.revenue - lastYear.revenue) / lastYear.revenue * 100;
+      }
+    }
+    var mom = null;
+    if (prev && prev.revenue) {
+      mom = (latest.revenue - prev.revenue) / prev.revenue * 100;
+    }
+
+    html += '<table>';
+    html += '<tr><th>最近營收月份</th><td class="mono">' + (latest.date || latest.revenue_month || '--') + '</td></tr>';
+    html += '<tr><th>營收（千元）</th><td class="mono">' + fmtInt(latest.revenue) + '</td></tr>';
+    if (mom !== null) {
+      html += '<tr><th>月增率 MoM</th><td class="mono ' + (mom > 0 ? 'pos' : 'neg') + '">' + (mom > 0 ? '+' : '') + fmt(mom, 1) + '%</td></tr>';
+      score += mom > 0 ? 1 : -1;
+    }
+    if (yoy !== null) {
+      html += '<tr><th>年增率 YoY</th><td class="mono ' + (yoy > 0 ? 'pos' : 'neg') + '">' + (yoy > 0 ? '+' : '') + fmt(yoy, 1) + '%</td></tr>';
+      score += yoy > 0 ? 1 : -1;
+    }
+    html += '</table>';
+  }
+
+  // 股利
+  if (d.dividend.length > 0) {
+    html += '<table style="margin-top:8px">';
+    html += '<tr><th>最近股利</th><td class="mono">' + fmt(d.dividend[d.dividend.length-1].CashDividends, 2) + ' 元</td></tr>';
+    html += '</table>';
+  }
+
+  // PER / PBR 估算
+  if (G.techData && G.techData.lastClose > 0) {
+    var eps = null;
+    if (d.dividend.length > 0) {
+      // 粗略用股利估算（假設配發率 70%）
+      var div = d.dividend[d.dividend.length-1].CashDividends;
+      if (div > 0) eps = div / 0.7;
+    }
+    if (eps && eps > 0) {
+      var per = G.techData.lastClose / eps;
+      html += '<div class="indicator-row"><span class="ind-label">估算 PER</span><span class="ind-value ' + (per < 15 ? 'pos' : (per > 25 ? 'neg' : 'neutral')) + '">' + fmt(per, 1) + ' 倍</span></div>';
+      score += per < 15 ? 1 : (per > 25 ? -1 : 0);
+    }
+  }
+
+  G.scores.fund = score;
+  html += '<div style="margin-top:8px">基本面評分 ' + scoreBadge(score) + '</div>';
+  el.innerHTML = html;
+}
+
+// --- 籌碼面 ---
+function renderChip() {
+  var el = document.getElementById('chipBody');
+  var d = G.chipData;
+  if (!d || (!d.inst.length && !d.margin.length)) {
+    el.innerHTML = '<div class="placeholder">無籌碼面資料</div>';
+    return;
+  }
+
+  var score = 0;
+  var html = '';
+
+  // 法人買賣超（最近交易日）
+  if (d.inst.length > 0) {
+    // 找最新日期
+    var latestDate = '';
+    d.inst.forEach(function(r){ if (r.date > latestDate) latestDate = r.date; });
+
+    var fiNet = 0, itNet = 0, dlNet = 0; // 外資、投信、自營商
+    d.inst.forEach(function(r){
+      if (r.date === latestDate) {
+        var net = (r.buy || 0) - (r.sell || 0);
+        var name = (r.name || '').toLowerCase();
+        // FinMind 法人名稱為英文：Foreign_Investor / Foreign_Dealer_Self / Investment_Trust / Dealer_self / Dealer_Hedging
+        if (name.indexOf('foreign') >= 0) fiNet += net;        // 外資（含外陸資）
+        else if (name.indexOf('investment') >= 0) itNet += net; // 投信
+        else if (name.indexOf('dealer') >= 0) dlNet += net;     // 自營商（含避險）
+      }
+    });
+
+    html += '<table>';
+    html += '<tr><th>法人買賣超日期</th><td class="mono">' + latestDate + '</td></tr>';
+    html += '<tr><th>外資買賣超</th><td class="mono ' + (fiNet > 0 ? 'pos' : 'neg') + '">' + (fiNet > 0 ? '+' : '') + fmtInt(fiNet) + ' 張</td></tr>';
+    html += '<tr><th>投信買賣超</th><td class="mono ' + (itNet > 0 ? 'pos' : 'neg') + '">' + (itNet > 0 ? '+' : '') + fmtInt(itNet) + ' 張</td></tr>';
+    html += '<tr><th>自營商買賣超</th><td class="mono ' + (dlNet > 0 ? 'pos' : 'neg') + '">' + (dlNet > 0 ? '+' : '') + fmtInt(dlNet) + ' 張</td></tr>';
+    html += '</table>';
+
+    var totalInst = fiNet + itNet + dlNet;
+    score += totalInst > 0 ? 2 : (totalInst < 0 ? -2 : 0);
+    if (fiNet > 0) score += 1;
+    if (itNet > 0) score += 1;
+  }
+
+  // 融資融券
+  if (d.margin.length > 0) {
+    var m = d.margin[d.margin.length - 1];
+    html += '<table style="margin-top:8px">';
+    html += '<tr><th>融資餘額</th><td class="mono">' + fmtInt(m.MarginPurchaseTodayBalance || 0) + ' 張</td></tr>';
+    html += '<tr><th>融券餘額</th><td class="mono">' + fmtInt(m.ShortSaleTodayBalance || 0) + ' 張</td></tr>';
+    html += '<tr><th>融資買進</th><td class="mono">' + fmtInt(m.MarginPurchaseBuy || 0) + ' 張</td></tr>';
+    html += '<tr><th>融資賣出</th><td class="mono">' + fmtInt(m.MarginPurchaseSell || 0) + ' 張</td></tr>';
+    html += '<tr><th>融券賣出</th><td class="mono">' + fmtInt(m.ShortSaleSell || 0) + ' 張</td></tr>';
+    html += '<tr><th>融券買進</th><td class="mono">' + fmtInt(m.ShortSaleBuy || 0) + ' 張</td></tr>';
+    html += '</table>';
+  }
+
+  G.scores.chip = score;
+  html += '<div style="margin-top:8px">籌碼面評分 ' + scoreBadge(score) + '</div>';
+  el.innerHTML = html;
+}
+
+// --- 法人族群流向 ---
+function renderSector() {
+  var el = document.getElementById('sectorBody');
+  var d = G.sectorData;
+  if (!d || d.status !== 200) {
+    el.innerHTML = '<div class="placeholder">無法人族群流向資料</div>';
+    return;
+  }
+
+  var html = '';
+  if (d.date) html += '<div style="margin-bottom:8px;font-size:.85rem;color:var(--text-dim)">資料日期：<span class="mono">' + d.date + '</span></div>';
+
+  // 前 3 名買超
+  html += '<div style="font-size:.85rem;color:var(--red);font-weight:700;margin-bottom:4px">🔴 資金流入 TOP 3</div>';
+  var topBuy = (d.top5_buy || []).slice(0, 3);
+  if (topBuy.length === 0) {
+    html += '<div class="placeholder" style="padding:10px">無明顯流入</div>';
+  } else {
+    topBuy.forEach(function(s){
+      html += '<div class="sector-item sector-buy"><span class="sector-name">' + s.industry + '</span><span class="sector-val pos">+' + fmtInt(s.net) + ' 張</span></div>';
+    });
+  }
+
+  // 前 3 名賣超
+  html += '<div style="font-size:.85rem;color:var(--green);font-weight:700;margin:12px 0 4px">🟢 資金流出 TOP 3</div>';
+  var topSell = (d.top5_sell || []).slice(0, 3);
+  if (topSell.length === 0) {
+    html += '<div class="placeholder" style="padding:10px">無明顯流出</div>';
+  } else {
+    topSell.forEach(function(s){
+      html += '<div class="sector-item sector-sell"><span class="sector-name">' + s.industry + '</span><span class="sector-val neg">' + fmtInt(s.net) + ' 張</span></div>';
+    });
+  }
+
+  // 當前股票產業動向
+  if (G.industry) {
+    html += '<div style="margin-top:12px;padding:10px;border-radius:8px;background:var(--card2)">';
+    html += '<div style="font-size:.85rem;color:var(--text-dim)">查詢股票所屬產業</div>';
+    html += '<div style="font-weight:700;margin:4px 0">' + G.industry + '</div>';
+    var found = null;
+    if (d.all_sectors) {
+      for (var i = 0; i < d.all_sectors.length; i++) {
+        if (d.all_sectors[i].industry === G.industry) { found = d.all_sectors[i]; break; }
+      }
+    }
+    if (found) {
+      var cls = found.net > 0 ? 'pos' : 'neg';
+      var sign = found.net > 0 ? '+' : '';
+      html += '<div class="mono ' + cls + '" style="font-size:1.1rem;font-weight:700">' + sign + fmtInt(found.net) + ' 張</div>';
+      html += '<div style="font-size:.8rem;color:var(--text-dim);margin-top:4px">' + (found.net > 0 ? '法人淨買超，資金流入' : '法人淨賣超，資金流出') + '</div>';
+    } else {
+      html += '<div style="font-size:.8rem;color:var(--text-dim)">無此產業資料</div>';
+    }
+    html += '</div>';
+  }
+
+  el.innerHTML = html;
+}
+
+// --- 法人買賣超排行 TOP10 ---
+function renderTopInst() {
+  var el = document.getElementById('topInstBody');
+  var d = G.topInstData;
+  if (!d || d.status !== 200) {
+    el.innerHTML = '<div class="placeholder">無法人買賣超排行資料</div>';
+    return;
+  }
+
+  var html = '';
+  if (d.date) html += '<div style="margin-bottom:8px;font-size:.85rem;color:var(--text-dim)">資料日期：<span class="mono">' + d.date + '</span></div>';
+
+  function rowHtml(s, isBuy) {
+    var highlight = (G.stockId && s.stock_id === G.stockId);
+    var cls = isBuy ? 'sector-item sector-buy' : 'sector-item sector-sell';
+    var valCls = isBuy ? 'pos' : 'neg';
+    var sign = isBuy ? '+' : '';
+    var style = highlight ? ' style="outline:1px solid var(--accent, #888);border-radius:6px"' : '';
+    return '<div class="' + cls + '"' + style + '>' +
+      '<span class="sector-name">' + s.stock_id + ' ' + (s.name || '') + '</span>' +
+      '<span class="sector-val ' + valCls + '">' + sign + fmtInt(s.net) + '</span></div>';
+  }
+
+  // TOP10 買超
+  html += '<div style="font-size:.85rem;color:var(--red);font-weight:700;margin-bottom:4px">🔴 法人買超 TOP10</div>';
+  var topBuy = d.top10_buy || [];
+  if (topBuy.length === 0) {
+    html += '<div class="placeholder" style="padding:10px">無明顯買超</div>';
+  } else {
+    topBuy.forEach(function(s){ html += rowHtml(s, true); });
+  }
+
+  // TOP10 賣超
+  html += '<div style="font-size:.85rem;color:var(--green);font-weight:700;margin:12px 0 4px">🟢 法人賣超 TOP10</div>';
+  var topSell = d.top10_sell || [];
+  if (topSell.length === 0) {
+    html += '<div class="placeholder" style="padding:10px">無明顯賣超</div>';
+  } else {
+    topSell.forEach(function(s){ html += rowHtml(s, false); });
+  }
+
+  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 三大法人（外資＋投信＋自營商）合計買賣超股數，非依產業分類</div>';
+
+  el.innerHTML = html;
+}
+
+// --- 美股概況 ---
+function renderUS() {
+  var el = document.getElementById('usBody');
+  var d = G.usData;
+  if (!d || d.status !== 200) {
+    el.innerHTML = '<div class="placeholder">無美股資料</div>';
+    G.scores.us = 0;
+    return;
+  }
+
+  var data = d.data || [];
+  var html = '';
+  var upCount = 0, downCount = 0;
+
+  data.forEach(function(m){
+    var cls = m.change > 0 ? 'pos' : (m.change < 0 ? 'neg' : 'neutral');
+    var sign = m.change > 0 ? '+' : '';
+    html += '<div class="us-item">';
+    html += '<span class="us-name">' + m.name + '</span>';
+    html += '<span><span class="us-close">' + fmt(m.close) + '</span> <span class="us-change ' + cls + '">' + sign + fmt(m.change) + ' (' + sign + fmt(m.change_pct, 2) + '%)</span></span>';
+    html += '</div>';
+    if (m.change > 0) upCount++; else if (m.change < 0) downCount++;
+  });
+
+  // 整體氛圍
+  var mood = '', moodCls = '';
+  if (upCount === 3) { mood = '🟢 全面上漲 — 美股氛圍正面'; moodCls = 'sector-buy'; G.scores.us = 1; }
+  else if (downCount === 3) { mood = '🔴 全面下跌 — 美股氛圍負面'; moodCls = 'sector-sell'; G.scores.us = -1; }
+  else { mood = '🟡 漲跌互見 — 美股氛圍分歧'; moodCls = ''; G.scores.us = 0; }
+
+  html += '<div class="us-mood ' + moodCls + '">' + mood + '</div>';
+  el.innerHTML = html;
+}
+
+// --- 新聞 ---
+function renderNews() {
+  var el = document.getElementById('newsBody');
+  var d = G.newsData;
+  if (!d || d.status !== 200 || !d.data || d.data.length === 0) {
+    el.innerHTML = '<div class="placeholder">無相關新聞</div>';
+    return;
+  }
+
+  // 情緒判斷關鍵字（正面：明確利多；負面：明確利空）
+  var posKeys = ['上漲','創高','獲利','利多','成長','新高','加碼','買進','調升','營收創','年增','月增','突破新高','動能延續','看好','樂觀','旺','噴出','大漲'];
+  var negKeys = ['下跌','虧損','警示','利空','衰退','破底','新低','賣出','調降','違約','下修','月減','慘摔','摔','跌停','重挫','暴跌','大跌','利空','減碼','看淡','保守','下滑','走跌','跌'];
+
+  var html = '';
+  d.data.forEach(function(n){
+    // 正負面分別計分，避免單一關鍵字誤判
+    var posScore = 0, negScore = 0;
+    posKeys.forEach(function(k){ if (n.title.indexOf(k) >= 0) posScore++; });
+    negKeys.forEach(function(k){ if (n.title.indexOf(k) >= 0) negScore++; });
+
+    var sentiment = 'neutral', tagCls = 'tag-neu', tagText = '中性';
+    if (posScore > negScore) { sentiment = 'pos'; tagCls = 'tag-pos'; tagText = '正面'; }
+    else if (negScore > posScore) { sentiment = 'neg'; tagCls = 'tag-neg'; tagText = '負面'; }
+
+    var titleCls = sentiment === 'pos' ? 'pos' : (sentiment === 'neg' ? 'neg' : '');
+
+    html += '<div class="news-item">';
+    html += '<div class="news-title"><a href="' + n.link + '" target="_blank" class="' + titleCls + '">' + n.title + '</a> <span class="news-tag ' + tagCls + '">' + tagText + '</span></div>';
+    html += '<div class="news-meta"><span>' + (n.source || '') + '</span><span>' + (n.pubDate || '') + '</span></div>';
+    html += '</div>';
+  });
+
+  el.innerHTML = html;
+}
+
+// --- AI 綜合操作建議 ---
+function renderVerdict() {
+  var el = document.getElementById('verdictBody');
+
+  var techScore = G.scores.tech || 0;
+  var fundScore = G.scores.fund || 0;
+  var chipScore = G.scores.chip || 0;
+  var usScore = G.scores.us || 0;
+  var total = techScore + fundScore + chipScore + usScore;
+  G.scores.total = total;
+
+  // 判定
+  var label, cls, icon;
+  if (total >= 4 && techScore > 0) {
+    label = '今日適合買進'; cls = 'verdict-buy'; icon = '🟢';
+  } else if (total <= -4 && techScore < 0) {
+    label = '建議出場'; cls = 'verdict-sell'; icon = '🔴';
+  } else if (total >= -3 && total <= -1) {
+    label = '謹慎減碼'; cls = 'verdict-reduce'; icon = '🟠';
+  } else {
+    label = '建議觀望'; cls = 'verdict-watch'; icon = '🟡';
+  }
+
+  var html = '';
+  html += '<div class="verdict-box ' + cls + '">';
+  html += '<div class="verdict-label">' + icon + ' ' + label + '</div>';
+  html += '<div class="verdict-score">總評分 ' + (total > 0 ? '+' : '') + total + '（技術 ' + (techScore>0?'+':'') + techScore + ' / 基本面 ' + (fundScore>0?'+':'') + fundScore + ' / 籌碼面 ' + (chipScore>0?'+':'') + chipScore + ' / 美股 ' + (usScore>0?'+':'') + usScore + '）</div>';
+  html += '</div>';
+
+  // 點位
+  if (G.techData) {
+    var t = G.techData;
+    html += '<div class="price-points">';
+    html += '<div class="price-point"><div class="label">🟢 建議買進點</div><div class="value pos">' + fmt(t.buy.low) + ' ~ ' + fmt(t.buy.high) + '</div></div>';
+    html += '<div class="price-point"><div class="label">🔴 建議賣出/停利點</div><div class="value neg">' + fmt(t.sell.low) + ' ~ ' + fmt(t.sell.high) + '</div></div>';
+    html += '<div class="price-point"><div class="label">🛑 建議停損點</div><div class="value neg">' + fmt(t.stopLoss) + '</div></div>';
+    html += '</div>';
+  }
+
+  // 理由
+  html += '<ul class="reasons">';
+  var reasons = buildReasons(techScore, fundScore, chipScore, usScore, total);
+  reasons.forEach(function(r){ html += '<li>' + r + '</li>'; });
+  html += '</ul>';
+
+  el.innerHTML = html;
+}
+
+function buildReasons(tech, fund, chip, us, total) {
+  var r = [];
+  var t = G.techData;
+
+  // 技術面理由
+  if (t) {
+    if (t.kd.cross.indexOf('黃金') >= 0) r.push('KD 出現黃金交叉（K=' + fmt(t.kd.k,1) + '，D=' + fmt(t.kd.d,1) + '），短線轉強訊號。');
+    else if (t.kd.cross.indexOf('死亡') >= 0) r.push('KD 出現死亡交叉（K=' + fmt(t.kd.k,1) + '，D=' + fmt(t.kd.d,1) + '），短線轉弱訊號。');
+    else r.push('KD 目前 ' + t.kd.cross + '（K=' + fmt(t.kd.k,1) + '，D=' + fmt(t.kd.d,1) + '）。');
+
+    if (t.macd.hist > 0) r.push('MACD 柱狀圖為正（' + t.macd.trend + '），DIF=' + fmt(t.macd.dif) + ' 高於訊號線=' + fmt(t.macd.dea) + '。');
+    else r.push('MACD 柱狀圖為負（' + t.macd.trend + '），DIF=' + fmt(t.macd.dif) + ' 低於訊號線=' + fmt(t.macd.dea) + '。');
+
+    r.push('布林通道位置：' + t.bb.pos + '（上軌 ' + fmt(t.bb.upper) + ' / 中軌 ' + fmt(t.bb.mid) + ' / 下軌 ' + fmt(t.bb.lower) + '）。');
+
+    if (t.ma20 !== null) {
+      if (t.lastClose > t.ma20) r.push('股價 ' + fmt(t.lastClose) + ' 站上 MA20=' + fmt(t.ma20) + '，中期趨勢偏多。');
+      else r.push('股價 ' + fmt(t.lastClose) + ' 跌破 MA20=' + fmt(t.ma20) + '，中期趨勢偏空。');
+    }
+  }
+
+  // 基本面理由
+  if (fund > 0) r.push('基本面評分為正（+' + fund + '），營收動能良好。');
+  else if (fund < 0) r.push('基本面評分為負（' + fund + '），營收動能偏弱。');
+  else r.push('基本面訊號中性。');
+
+  // 籌碼面理由
+  if (chip > 0) r.push('籌碼面評分為正（+' + chip + '），法人買超，籌碼面偏多。');
+  else if (chip < 0) r.push('籌碼面評分為負（' + chip + '），法人賣超，籌碼面偏空。');
+  else r.push('籌碼面訊號中性。');
+
+  // 美股理由
+  if (us > 0) r.push('美股三大指數全面上漲，外圍氛圍正面，有利台股表現。');
+  else if (us < 0) r.push('美股三大指數全面下跌，外圍氛圍負面，不利台股表現。');
+  else r.push('美股漲跌互見，外圍氛圍分歧。');
+
+  // 總結
+  r.push('綜合總評分 ' + (total > 0 ? '+' : '') + total + '，技術面 ' + (tech > 0 ? '偏多' : (tech < 0 ? '偏空' : '中性')) + '。');
+
+  return r.slice(0, 8);
+}
+
+// ===========================================================================
+// 初始化
+// ===========================================================================
+document.getElementById('stockInput').focus();
+</script>
+</body>
+</html>
+
