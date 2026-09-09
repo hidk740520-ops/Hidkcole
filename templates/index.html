@@ -139,6 +139,14 @@ tr:last-child td{border-bottom:none}
 <div class="container">
 <div class="grid">
 
+  <!-- ===== 策略燈號 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">🚦</span>策略燈號（短線／波段）</div>
+    <div class="card-body" id="strategyBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
   <!-- ===== 技術面 ===== -->
   <div class="card">
     <div class="card-title"><span class="icon">📈</span>技術面分析</div>
@@ -288,7 +296,7 @@ function doSearch() {
   };
 
   // 顯示 loading
-  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody'];
+  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody'];
   bodies.forEach(function(id){
     document.getElementById(id).innerHTML = loadingHtml('載入中...');
   });
@@ -374,6 +382,7 @@ function fetchTechData() {
       G.techData = {
         lastClose: j.close,
         lastDate: j.date,
+        change: j.change, changePct: j.change_pct,
         ma5: j.ma.MA5, ma10: j.ma.MA10, ma20: j.ma.MA20, ma60: j.ma.MA60,
         kd: { k: j.kd.K, d: j.kd.D, cross: j.kd.cross },
         macd: { dif: j.macd.DIF, dea: j.macd.DEA, hist: j.macd.Hist, dir: j.macd.dir, trend: j.macd.trend },
@@ -383,7 +392,8 @@ function fetchTechData() {
         buy: { low: j.trade_points.buy_low, high: j.trade_points.buy_high },
         sell: { low: j.trade_points.sell_low, high: j.trade_points.sell_high },
         stopLoss: j.trade_points.stop_loss,
-        score: j.score
+        score: j.score,
+        strategy: j.strategy || null
       };
     });
 }
@@ -459,6 +469,7 @@ function fetchNews() {
 // 渲染：全部
 // ===========================================================================
 function renderAll() {
+  renderStrategy();
   renderTech();
   renderFund();
   renderChip();
@@ -467,6 +478,50 @@ function renderAll() {
   renderUS();
   renderNews();
   renderVerdict();
+}
+
+// --- 策略燈號（短線3~5天 / 波段2~3週）---
+function renderStrategy() {
+  var el = document.getElementById('strategyBody');
+  var s = G.techData && G.techData.strategy;
+  if (!s) {
+    el.innerHTML = '<div class="placeholder">無策略訊號資料</div>';
+    return;
+  }
+
+  var lightMap = {
+    green: { label: '🟢 綠燈（多頭共振）', color: 'var(--red)' },
+    red:   { label: '🔴 紅燈（警戒過熱）', color: 'var(--orange)' },
+    gray:  { label: '⚪ 灰燈（觀望期）', color: 'var(--text-dim)' },
+    neutral: { label: '🟡 中性（訊號不明確）', color: 'var(--yellow)' }
+  };
+  var lm = lightMap[s.light] || lightMap.neutral;
+
+  var html = '<div style="font-size:1.1rem;font-weight:700;margin-bottom:10px;color:' + lm.color + '">' + lm.label + '</div>';
+
+  function actionCls(action) {
+    if (action.indexOf('買進') >= 0) return 'pos';
+    if (action.indexOf('停損') >= 0 || action.indexOf('賣出') >= 0 || action.indexOf('了結') >= 0) return 'neg';
+    return '';
+  }
+
+  html += '<div style="padding:10px;border-radius:8px;background:var(--card2);margin-bottom:8px">';
+  html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">短線戰法（3~5天，KD(5,3,3)）</div>';
+  html += '<div class="mono ' + actionCls(s.short.action) + '" style="font-weight:700;margin-bottom:6px">' + s.short.action + '</div>';
+  html += '<ul style="margin:0;padding-left:18px;font-size:.85rem;color:var(--text-dim)">';
+  s.short.reasons.forEach(function(r){ html += '<li>' + r + '</li>'; });
+  html += '</ul></div>';
+
+  html += '<div style="padding:10px;border-radius:8px;background:var(--card2)">';
+  html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">波段戰法（2~3週，週KD(9,3,3)＋日KD(9,3,3)）</div>';
+  html += '<div class="mono ' + actionCls(s.mid.action) + '" style="font-weight:700;margin-bottom:6px">' + s.mid.action + '</div>';
+  html += '<ul style="margin:0;padding-left:18px;font-size:.85rem;color:var(--text-dim)">';
+  s.mid.reasons.forEach(function(r){ html += '<li>' + r + '</li>'; });
+  html += '</ul></div>';
+
+  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 訊號僅供參考，不構成投資建議；未包含市值前50大／電子半導體產業篩選</div>';
+
+  el.innerHTML = html;
 }
 
 // --- 技術面 ---
@@ -479,7 +534,13 @@ function renderTech() {
 
   var html = '<table style="margin-bottom:12px">';
   html += '<tr><th>日期</th><td class="mono">' + t.lastDate + '</td></tr>';
-  html += '<tr><th>收盤價</th><td class="mono pos">' + fmt(t.lastClose) + '</td></tr>';
+  var chgCls = 'neutral', chgText = '';
+  if (t.change != null && t.changePct != null) {
+    chgCls = t.change > 0 ? 'pos' : (t.change < 0 ? 'neg' : 'neutral');
+    var sign = t.change > 0 ? '+' : '';
+    chgText = ' <span class="mono ' + chgCls + '">' + sign + fmt(t.change) + ' (' + sign + fmt(t.changePct, 2) + '%)</span>';
+  }
+  html += '<tr><th>收盤價</th><td class="mono ' + chgCls + '">' + fmt(t.lastClose) + chgText + '</td></tr>';
   html += '<tr><th>MA5</th><td class="mono">' + fmt(t.ma5) + '</td></tr>';
   html += '<tr><th>MA10</th><td class="mono">' + fmt(t.ma10) + '</td></tr>';
   html += '<tr><th>MA20</th><td class="mono">' + fmt(t.ma20) + '</td></tr>';
