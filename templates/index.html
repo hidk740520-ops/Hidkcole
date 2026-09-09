@@ -133,6 +133,18 @@ tr:last-child td{border-bottom:none}
     <input type="text" id="stockInput" placeholder="輸入股票代號（如 2308）或名稱..." onkeypress="if(event.key==='Enter')doSearch()">
     <button class="btn btn-primary" id="searchBtn" onclick="doSearch()">健診</button>
   </div>
+  <div style="margin-top:8px;font-size:.85rem;color:var(--text-dim);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <label for="entryDateInput">我的進場日期（選填，用於精確停損／停利判定）：</label>
+    <input type="date" id="entryDateInput" style="background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
+  </div>
+  <div style="margin-top:8px;font-size:.85rem;color:var(--text-dim);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <label for="buyPriceInput">我的買入價（選填，不存檔，僅供本次分析）：</label>
+    <input type="number" step="0.01" id="buyPriceInput" placeholder="例如 1050" style="width:100px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
+    <label for="sharesInput">張數：</label>
+    <input type="number" step="0.001" id="sharesInput" placeholder="例如 1" style="width:80px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
+    <label><input type="radio" name="strategyPref" value="short" checked> 短線</label>
+    <label><input type="radio" name="strategyPref" value="mid"> 波段</label>
+  </div>
 </div>
 
 <!-- ===================== MAIN ===================== -->
@@ -144,6 +156,22 @@ tr:last-child td{border-bottom:none}
     <div class="card-title"><span class="icon">🚦</span>策略燈號（短線／波段）</div>
     <div class="card-body" id="strategyBody">
       <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+  <!-- ===== 估值分析 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">💰</span>估值分析（合理價格區間）</div>
+    <div class="card-body" id="valuationBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
+  <!-- ===== 持股價格分析 ===== -->
+  <div class="card">
+    <div class="card-title"><span class="icon">📌</span>持股價格分析</div>
+    <div class="card-body" id="positionBody">
+      <div class="placeholder">填寫上方「買入價」後查詢即可看到分析</div>
     </div>
   </div>
 
@@ -296,7 +324,7 @@ function doSearch() {
   };
 
   // 顯示 loading
-  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody'];
+  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody'];
   bodies.forEach(function(id){
     document.getElementById(id).innerHTML = loadingHtml('載入中...');
   });
@@ -375,7 +403,18 @@ function doSearch() {
 
 // --- 技術面：改呼叫後端 /api/stock（pandas 計算指標）---
 function fetchTechData() {
-  return fetch('/api/stock?symbol=' + encodeURIComponent(G.stockId))
+  var url = '/api/stock?symbol=' + encodeURIComponent(G.stockId);
+  var entryDate = document.getElementById('entryDateInput').value;
+  if (entryDate) url += '&entry_date=' + encodeURIComponent(entryDate);
+  var buyPrice = document.getElementById('buyPriceInput').value;
+  if (buyPrice) {
+    url += '&buy_price=' + encodeURIComponent(buyPrice);
+    var shares = document.getElementById('sharesInput').value;
+    if (shares) url += '&shares=' + encodeURIComponent(shares);
+    var strategyPref = document.querySelector('input[name="strategyPref"]:checked').value;
+    url += '&strategy_pref=' + encodeURIComponent(strategyPref);
+  }
+  return fetch(url)
     .then(function(r){ return r.json(); })
     .then(function(j){
       if (j.status !== 200) {
@@ -399,7 +438,9 @@ function fetchTechData() {
         sell: { low: j.trade_points.sell_low, high: j.trade_points.sell_high },
         stopLoss: j.trade_points.stop_loss,
         score: j.score,
-        strategy: j.strategy || null
+        strategy: j.strategy || null,
+        valuation: j.valuation || null,
+        position: j.position || null
       };
     });
 }
@@ -476,6 +517,8 @@ function fetchNews() {
 // ===========================================================================
 function renderAll() {
   renderStrategy();
+  renderValuation();
+  renderPosition();
   renderTech();
   renderFund();
   renderChip();
@@ -507,7 +550,7 @@ function renderStrategy() {
 
   function actionCls(action) {
     if (action.indexOf('買進') >= 0) return 'pos';
-    if (action.indexOf('停損') >= 0 || action.indexOf('賣出') >= 0 || action.indexOf('了結') >= 0) return 'neg';
+    if (action.indexOf('停損') >= 0 || action.indexOf('賣出') >= 0 || action.indexOf('了結') >= 0 || action.indexOf('結清') >= 0) return 'neg';
     return '';
   }
 
@@ -527,6 +570,61 @@ function renderStrategy() {
 
   html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 訊號僅供參考，不構成投資建議；未包含市值前50大／電子半導體產業篩選</div>';
 
+  el.innerHTML = html;
+}
+
+// --- 估值分析（階段1：合理價格區間，簡化版 P/E Band）---
+function renderValuation() {
+  var el = document.getElementById('valuationBody');
+  var v = G.techData && G.techData.valuation;
+  if (!G.techData) { el.innerHTML = '<div class="placeholder">輸入股票代號開始健診</div>'; return; }
+  if (!v) {
+    el.innerHTML = errHtml('本益比歷史資料不足，無法計算估值區間');
+    return;
+  }
+  var html = '<table style="margin-bottom:8px">';
+  html += '<tr><th>近期反推EPS</th><td class="mono">' + fmt(v.eps) + '</td></tr>';
+  html += '<tr><th>歷史本益比</th><td class="mono">' + fmt(v.pe_low,1) + ' ～ ' + fmt(v.pe_avg,1) + ' ～ ' + fmt(v.pe_high,1) + '（低／均／高）</td></tr>';
+  html += '<tr><th>合理價格</th><td class="mono">' + fmt(v.reasonable_price) + '</td></tr>';
+  html += '<tr><th>合理買入上限</th><td class="mono pos">' + fmt(v.buy_ceiling) + '</td></tr>';
+  html += '<tr><th>估值目標價</th><td class="mono neg">' + fmt(v.target_price) + '</td></tr>';
+  html += '<tr><th>目前區間</th><td><b>' + v.zone + '</b></td></tr>';
+  html += '</table>';
+  html += '<div style="font-size:.75rem;color:var(--text-dim)">＊ 免費資料無「分析師預估EPS」，以近期本益比反推的EPS替代，僅供參考，非投資建議</div>';
+  el.innerHTML = html;
+}
+
+// --- 持股價格分析（選填輸入買入價，不存檔，當下即時分析）---
+function renderPosition() {
+  var el = document.getElementById('positionBody');
+  var p = G.techData && G.techData.position;
+  var buyPriceVal = document.getElementById('buyPriceInput').value;
+  if (!G.techData) { el.innerHTML = '<div class="placeholder">填寫上方「買入價」後查詢即可看到分析</div>'; return; }
+  if (!buyPriceVal) {
+    el.innerHTML = '<div class="placeholder">填寫上方「買入價」後查詢即可看到分析</div>';
+    return;
+  }
+  if (!p) { el.innerHTML = errHtml('無法計算持股分析'); return; }
+
+  // 依 app 慣例（紅漲綠跌）：HOLD/ADD 用紅、STOP 用綠、REDUCE 用黃
+  var color = p.status === 'STOP' ? 'var(--green)' : (p.status === 'REDUCE' ? 'var(--yellow)' : (p.status === 'ADD' ? 'var(--blue)' : 'var(--red)'));
+
+  var html = '<div style="text-align:center;font-size:1.3rem;font-weight:700;color:' + color + ';margin-bottom:10px">' + p.status_label + '</div>';
+  html += '<table style="margin-bottom:8px">';
+  html += '<tr><th>買入價</th><td class="mono">' + fmt(buyPriceVal) + '</td></tr>';
+  html += '<tr><th>目前價</th><td class="mono">' + fmt(G.techData.lastClose) + '</td></tr>';
+  if (p.profit_pct != null) {
+    var pCls = p.profit_pct > 0 ? 'pos' : (p.profit_pct < 0 ? 'neg' : 'neutral');
+    var pSign = p.profit_pct > 0 ? '+' : '';
+    html += '<tr><th>目前損益</th><td class="mono ' + pCls + '">' + pSign + fmt(p.profit_pct,2) + '%</td></tr>';
+  }
+  html += '<tr><th>補倉判斷</th><td>' + p.add_action + '</td></tr>';
+  html += '<tr><th>賣出判斷</th><td>' + p.sell_action + '</td></tr>';
+  if (p.stop_loss != null) html += '<tr><th>參考停損價</th><td class="mono neg">' + fmt(p.stop_loss) + '</td></tr>';
+  if (p.take_profit != null) html += '<tr><th>參考停利價</th><td class="mono pos">' + fmt(p.take_profit) + '</td></tr>';
+  html += '</table>';
+  html += '<div style="background:var(--card2);border-radius:8px;padding:10px;font-size:.9rem">💡 ' + p.recommendation + '</div>';
+  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 此分析僅依當下輸入即時計算，不會儲存，重新整理後需重新輸入</div>';
   el.innerHTML = html;
 }
 
@@ -721,7 +819,7 @@ function renderSector() {
   var el = document.getElementById('sectorBody');
   var d = G.sectorData;
   if (!d || d.status !== 200) {
-    el.innerHTML = '<div class="placeholder">無法人族群流向資料</div>';
+    el.innerHTML = errHtml((d && d.msg) || '無法人族群流向資料');
     return;
   }
 
@@ -772,6 +870,8 @@ function renderSector() {
     html += '</div>';
   }
 
+  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 資料來源：證交所 T86（僅涵蓋上市股票，不含上櫃）</div>';
+
   el.innerHTML = html;
 }
 
@@ -780,7 +880,7 @@ function renderTopInst() {
   var el = document.getElementById('topInstBody');
   var d = G.topInstData;
   if (!d || d.status !== 200) {
-    el.innerHTML = '<div class="placeholder">無法人買賣超排行資料</div>';
+    el.innerHTML = errHtml((d && d.msg) || '無法人買賣超排行資料');
     return;
   }
 
@@ -816,7 +916,7 @@ function renderTopInst() {
     topSell.forEach(function(s){ html += rowHtml(s, false); });
   }
 
-  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 三大法人（外資＋投信＋自營商）合計買賣超股數，非依產業分類</div>';
+  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 三大法人（外資＋投信＋自營商）合計買賣超股數；資料來源：證交所 T86（僅涵蓋上市股票，不含上櫃）</div>';
 
   el.innerHTML = html;
 }
@@ -984,6 +1084,9 @@ function buildReasons(tech, fund, chip, us, total) {
 // 初始化
 // ===========================================================================
 document.getElementById('stockInput').focus();
+document.getElementById('entryDateInput').addEventListener('change', function(){
+  if (G.stockId) doSearch();
+});
 </script>
 </body>
 </html>
