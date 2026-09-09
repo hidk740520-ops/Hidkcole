@@ -66,6 +66,34 @@ def finmind_get(params, timeout=20):
     return data, None
 
 
+def fetch_twse_t86(max_lookback_days=7):
+    """
+    從台灣證券交易所官方免費 OpenData 端點（T86 三大法人買賣超日報）
+    取得「上市」全市場個股法人買賣超（無需 FinMind 帳號/配額，
+    FinMind 該資料集全市場查詢屬付費 Sponsor 專屬功能，此為免費替代方案）。
+    自動往回找最近一個有效交易日（跳過假日）。
+    回傳 (rows, date_str) 或 ([], None)；rows 為 [{欄位: 值}, ...]。
+    注意：僅涵蓋「上市」股票，不含「上櫃」。
+    """
+    for i in range(max_lookback_days):
+        d = datetime.now() - timedelta(days=i)
+        date_str = d.strftime("%Y%m%d")
+        try:
+            resp = requests.get(
+                "https://www.twse.com.tw/rwd/zh/fund/T86",
+                params={"date": date_str, "selectType": "ALL", "response": "json"},
+                timeout=20,
+            )
+            j = resp.json()
+        except Exception:
+            continue
+        if j.get("stat") == "OK" and j.get("data"):
+            fields = j.get("fields", [])
+            rows = [dict(zip(fields, row)) for row in j["data"]]
+            return rows, d.strftime("%Y-%m-%d")
+    return [], None
+
+
 # ---------------------------------------------------------------------------
 # 全域 cache（用於 /api/sector_flow，TTL 1 小時）
 # ---------------------------------------------------------------------------
@@ -243,10 +271,153 @@ def fetch_revenue_yoy(stock_id):
         return None
 
 
-def build_strategy_signals(latest, prev, weekly_kd, revenue_yoy, vol_ma20, day_of_month):
+def fetch_valuation(stock_id, current_price):
+    """
+    估值引擎（簡化版 P/E Band）：
+    抓近 3 年 TaiwanStockPER（FinMind 免費資料集），取歷史本益比的
+    最低／平均／最高，並用「目前股價 ÷ 最新本益比」反推近期 EPS
+    （注意：免費資料無法取得分析師「預估EPS」，這裡以近期實際
+    本益比反推的 EPS 作為替代，精準度不如真正的預估EPS，僅供參考）。
+
+    回傳 dict 或 None（資料不足時）：
+    {
+        eps, pe_low, pe_avg, pe_high,
+        reasonable_price, buy_ceiling, target_price,
+        zone  # 低估 / 合理買入區 / 合理價 / 偏高估 / 高估
+    }
+    """
+    try:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=1100)).strftime("%Y-%m-%d")  # 約 3 年
+        data, _err = finmind_get({
+            "dataset": "TaiwanStockPER",
+            "data_id": stock_id,
+            "start_date": start_date,
+            "end_date": end_date,
+        }, timeout=20)
+        if not data:
+            return None
+
+        data = sorted(data, key=lambda r: r.get("date", ""))
+        pe_list = [r.get("PER") for r in data if r.get("PER") and r.get("PER") > 0]
+        if len(pe_list) < 10:
+            return None
+
+        latest_per = None
+        for r in reversed(data):
+            if r.get("PER") and r.get("PER") > 0:
+                latest_per = r["PER"]
+                break
+        if not latest_per:
+            return None
+
+        eps = current_price / latest_per
+        pe_low = min(pe_list)
+        pe_high = max(pe_list)
+        pe_avg = sum(pe_list) / len(pe_list)
+
+        reasonable_price = eps * pe_avg
+        buy_ceiling = eps * pe_avg * 1.1
+        target_price = eps * pe_high * 0.9
+
+        if current_price < eps * pe_low * 1.05:
+            zone = "低估／強力買入區"
+        elif current_price <= buy_ceiling:
+            zone = "合理買入區"
+        elif current_price <= reasonable_price * 1.15:
+            zone = "偏高估"
+        else:
+            zone = "高估區"
+
+        return {
+            "eps": round(eps, 2),
+            "pe_low": round(pe_low, 1),
+            "pe_avg": round(pe_avg, 1),
+            "pe_high": round(pe_high, 1),
+            "reasonable_price": round(reasonable_price, 1),
+            "buy_ceiling": round(buy_ceiling, 1),
+            "target_price": round(target_price, 1),
+            "zone": zone,
+        }
+    except Exception:
+        return None
+
+
+def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
+                      recent_high5, volume, vol_ma5, short_sig, mid_sig, valuation):
+    """
+    持股價格即時分析（無需存檔，每次輸入當下計算）。
+    依使用者輸入的買入價／張數／策略（short 或 mid），
+    結合既有的短線／波段策略訊號與估值資料，給出：
+    HOLD（持有）／ADD（可補倉）／REDUCE（停利／減碼）／STOP（建議停損）
+    """
+    profit_pct = round((close - buy_price) / buy_price * 100, 2) if buy_price else None
+    sig = short_sig if strategy_pref == "short" else mid_sig
+    action = sig["action"]
+
+    status = "HOLD"
+    status_label = "🟢 持有"
+    add_action = "暫不補倉"
+    sell_action = "尚未觸發"
+    reasons = []
+
+    stop_ref = ma5 if strategy_pref == "short" else ma20
+    stop_loss = round(stop_ref, 2) if stop_ref is not None else None
+    take_profit = None
+    if valuation:
+        take_profit = valuation["target_price"]
+    elif recent_high5 is not None:
+        take_profit = round(recent_high5 * 1.05, 2)
+
+    if "停損" in action:
+        status = "STOP"
+        status_label = "🔴 建議停損"
+        sell_action = "已觸發停損條件"
+        reasons.append(sig["reasons"][0] if sig["reasons"] else "已跌破防守價位")
+    elif "結清" in action or "了結" in action:
+        status = "REDUCE"
+        status_label = "🟡 停利／減碼"
+        sell_action = "已達停利／過熱條件，建議分批減碼"
+        reasons.extend(sig["reasons"])
+    else:
+        # 判斷是否符合補倉條件（賺錢狀態 + 突破近期高點 + 量能配合）
+        breakout = (
+            close is not None and recent_high5 is not None and close > recent_high5
+            and volume is not None and vol_ma5 and volume > vol_ma5
+        )
+        profitable = profit_pct is not None and profit_pct > 0
+        if action == "買進訊號" and profitable and breakout:
+            status = "ADD"
+            status_label = "🔵 可以考慮補倉"
+            add_action = f"建議補倉區間：{round(close*0.99,1)}～{round(close*1.01,1)}"
+            reasons.append("趨勢偏多、獲利中且突破近期高點並帶量")
+        else:
+            reasons.append("目前尚未突破關鍵壓力，不建議追價加碼" if not breakout else "訊號尚未同時滿足補倉條件")
+
+    recommendation = status_label.split(" ", 1)[-1] + "：" + ("；".join(reasons) if reasons else "持續觀察")
+
+    return {
+        "profit_pct": profit_pct,
+        "status": status,
+        "status_label": status_label,
+        "add_action": add_action,
+        "sell_action": sell_action,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "recommendation": recommendation,
+    }
+
+
+
     """
     依照短線（3~5天）與波段（2~3週）兩套策略計算買賣訊號與燈號。
     回傳 dict：{light, short:{action,reasons}, mid:{action,reasons}}
+
+    entry_date（選填，格式 YYYY-MM-DD）：使用者進場日期。
+    若提供，短線賣出/停損訊號會完全依規格判定：
+        強制停損：收盤價 < 進場當天低點  或  收盤價 < 5MA
+        短線利多結清：(日K_5>80 且已死叉)  或  持有天數 >= 5
+    未提供則使用不需進場資訊的簡化版判斷。
     """
     def g(row, key):
         v = row[key] if row is not None else None
@@ -264,6 +435,17 @@ def build_strategy_signals(latest, prev, weekly_kd, revenue_yoy, vol_ma20, day_o
     pk9 = g(prev, "K")
     volume = g(latest, "Volume")
     revenue_hot_period = 1 <= day_of_month <= 10
+
+    # --- 若提供進場日期，查出當天低點與持有天數 ---
+    entry_low = None
+    holding_days = None
+    if entry_date and df is not None:
+        match = df[df["Date"] == entry_date]
+        if not match.empty:
+            entry_low = float(match.iloc[0]["Low"])
+            # 持有天數＝進場日到最新一筆資料之間的交易日數
+            entry_idx = match.index[0]
+            holding_days = int(len(df) - 1 - entry_idx)
 
     # ---------------- 短線（3~5天）：KD(5,3,3) ----------------
     short_reasons = []
@@ -286,8 +468,26 @@ def build_strategy_signals(latest, prev, weekly_kd, revenue_yoy, vol_ma20, day_o
             short_reasons.append("成交量放大（>20日均量）")
         if revenue_hot_period:
             short_reasons.append("目前為每月營收公佈期（1-10號），策略建議觀望")
+
         if kd5_cross_up and price_above_ma5 and ma5_up and vol_ok and not_hot:
             short_action = "買進訊號"
+        elif entry_date and (entry_low is not None or holding_days is not None):
+            # --- 完整規格：已提供進場資訊，精確判定停損/停利 ---
+            forced_stop = (entry_low is not None and close < entry_low) or close < ma5
+            take_profit = (k5 is not None and d5 is not None and k5 > 80 and k5 < d5) or \
+                          (holding_days is not None and holding_days >= 5)
+            if forced_stop:
+                short_action = "強制停損"
+                if entry_low is not None and close < entry_low:
+                    short_reasons.append(f"跌破進場當天低點（{entry_low}）")
+                if close < ma5:
+                    short_reasons.append("跌破5日均線")
+            elif take_profit:
+                short_action = "短線利多結清"
+                if k5 is not None and k5 > 80 and d5 is not None and k5 < d5:
+                    short_reasons.append("5日KD高檔死叉（K>80且K<D）")
+                if holding_days is not None and holding_days >= 5:
+                    short_reasons.append(f"已持有 {holding_days} 天，達 3-5 天短線週期")
         elif (k5 is not None and d5 is not None and k5 < d5) or (close < ma5):
             short_action = "賣出／停損訊號"
             if k5 < d5:
@@ -319,15 +519,26 @@ def build_strategy_signals(latest, prev, weekly_kd, revenue_yoy, vol_ma20, day_o
         mid_reasons.append("站上月線(20MA)" if above_ma20 else "跌破月線(20MA)")
         if revenue_yoy is not None:
             mid_reasons.append(f"最新營收年增率 {revenue_yoy:+.1f}%")
+        # 完整規格為 (營收YoY>0) or (營收公佈後股價不跌反突破)；
+        # 後者需精確比對公佈日期與股價反應，此處暫僅以 YoY>0 判定，
+        # 未涵蓋「公佈後不跌反突破」這個 OR 分支
         rev_ok = (revenue_yoy is not None and revenue_yoy > 0)
+
+        # 日KD 高檔死亡交叉：前一日 K>=D，今日 K<D，且今日 K 仍在高檔（>80）附近
+        daily_dead_cross_high = (
+            k9 is not None and d9 is not None and k9 < d9
+            and pk9 is not None and pd9 is not None and pk9 >= pd9
+            and (k9 > 80 or pk9 > 80)
+        )
 
         if week_up and daily_gold_cross and above_ma20 and rev_ok:
             mid_action = "買進訊號"
         elif close < ma20:
             mid_action = "停損出場"
-        elif k9 is not None and k9 > 80 and pk9 is not None and k9 < pk9:
+            mid_reasons.append("跌破波段生命線（月線20MA）")
+        elif daily_dead_cross_high:
             mid_action = "獲利了結"
-            mid_reasons.append("日KD高檔（>80）轉折向下")
+            mid_reasons.append("日KD高檔（>80）死亡交叉，動能減弱")
     else:
         mid_reasons.append("資料不足，無法判定波段訊號")
 
@@ -506,11 +717,43 @@ def get_stock_data():
     # --- 策略訊號（短線3~5天 KD(5,3,3) ／ 波段2~3週 週KD(9,3,3)+日KD(9,3,3)+營收YoY）---
     weekly_kd = calc_weekly_kd9(df)
     revenue_yoy = fetch_revenue_yoy(stock_id)
+    entry_date = request.args.get("entry_date", "").strip() or None
     strategy = build_strategy_signals(
         latest, prev, weekly_kd, revenue_yoy,
         float(latest["Vol_MA20"]) if latest["Vol_MA20"] is not None else None,
         datetime.now().day,
+        df=df, entry_date=entry_date,
     )
+
+    # --- 估值引擎（階段1：合理價格 / 合理買入上限 / 目標價）---
+    valuation = fetch_valuation(stock_id, float(latest["Close"]))
+
+    # --- 持股價格即時分析（選填，不存檔，當下輸入當下算）---
+    position = None
+    buy_price_arg = request.args.get("buy_price", "").strip()
+    if buy_price_arg:
+        try:
+            buy_price = float(buy_price_arg)
+            shares_arg = request.args.get("shares", "").strip()
+            shares = float(shares_arg) if shares_arg else None
+            strategy_pref = request.args.get("strategy_pref", "short").strip()
+            if strategy_pref not in ("short", "mid"):
+                strategy_pref = "short"
+            recent_n5 = min(5, len(df))
+            recent_high5 = float(df["High"].iloc[-recent_n5:].max())
+            position = analyze_position(
+                buy_price, shares, strategy_pref,
+                float(latest["Close"]),
+                float(latest["MA5"]) if latest["MA5"] is not None else None,
+                float(latest["MA20"]) if latest["MA20"] is not None else None,
+                float(latest["MA60"]) if latest["MA60"] is not None else None,
+                recent_high5,
+                float(latest["Volume"]) if latest["Volume"] is not None else None,
+                float(latest["Vol_MA5"]) if latest["Vol_MA5"] is not None else None,
+                strategy["short"], strategy["mid"], valuation,
+            )
+        except (ValueError, TypeError):
+            position = None
 
     result = {
         "status": 200,
@@ -564,6 +807,8 @@ def get_stock_data():
         },
         "score": score,
         "strategy": strategy,
+        "valuation": valuation,
+        "position": position,
     }
     return jsonify(result)
 
@@ -734,39 +979,26 @@ def get_sector_flow():
     if not industry_map:
         return jsonify({"status": 500, "msg": "無法取得產業別資料"}), 500
 
-    # --- Step 2: 取得最近交易日的法人買賣超 ---
-    # TaiwanStockInstitutionalInvestorsBuySell 每日資料量大，取最近 3 天再篩最新日
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+    # --- Step 2: 取得最近交易日的法人買賣超（改用 TWSE 官方免費 T86，涵蓋全市場）---
+    t86_rows, latest_date = fetch_twse_t86()
+    if not t86_rows:
+        return jsonify({"status": 500, "msg": "無法取得 TWSE 法人買賣超資料（近期無交易日資料或連線失敗）"}), 500
 
-    raw, err = finmind_get({
-        "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
-        "start_date": start_date,
-        "end_date": end_date,
-    }, timeout=60)
-    if err:
-        return jsonify({"status": 500, "msg": err}), 500
+    def _num(v):
+        try:
+            return int(str(v).replace(",", "").strip() or 0)
+        except Exception:
+            return 0
 
-    if not raw:
-        return jsonify({"status": 500, "msg": "法人買賣超資料為空"}), 500
-
-    # 找出最新交易日
-    latest_date = max(row.get("date", "") for row in raw if row.get("date"))
-
-    # 統計各產業的外資 + 投信合計淨買超（張）
+    # 統計各產業的外資 + 投信合計淨買超（股，非張）
     sector_net = {}  # {industry: net_buy}
-    for row in raw:
-        if row.get("date") != latest_date:
-            continue
-        sid = row.get("stock_id", "")
+    for row in t86_rows:
+        sid = (row.get("證券代號") or "").strip()
         cat = industry_map.get(sid, "其他")
-        investor = (row.get("name", "") or "").lower()  # FinMind 回傳英文
-        buy = row.get("buy", 0) or 0
-        sell = row.get("sell", 0) or 0
-        net = buy - sell
-        # 只統計外資 + 投信（FinMind 名稱：Foreign_Investor / Investment_Trust）
-        if "foreign" in investor or "investment" in investor:
-            sector_net[cat] = sector_net.get(cat, 0) + net
+        foreign_net = _num(row.get("外陸資買賣超股數(不含外資自營商)")) + _num(row.get("外資自營商買賣超股數"))
+        trust_net = _num(row.get("投信買賣超股數"))
+        net = round((foreign_net + trust_net) / 1000)  # 股 → 張
+        sector_net[cat] = sector_net.get(cat, 0) + net
 
     # 排序
     sorted_sectors = sorted(sector_net.items(), key=lambda x: x[1], reverse=True)
@@ -816,64 +1048,33 @@ def get_top_institutional():
     ):
         return jsonify({"status": 200, "cached": True, **_top_inst_cache["data"]})
 
-    # --- Step 1: 取得股票代號 → 名稱對照表 ---
-    name_map = {}
-    try:
-        info_data, err = finmind_get({"dataset": "TaiwanStockInfo"}, timeout=30)
-        if err:
-            return jsonify({"status": 500, "msg": err}), 500
-        for row in info_data:
-            sid = row.get("stock_id", "")
-            if sid:
-                name_map[sid] = row.get("stock_name", "")
-    except Exception as e:
-        return jsonify({"status": 500, "msg": f"取得股票名稱失敗: {e}"}), 500
+    # --- 取得最近交易日全市場法人買賣超（TWSE 官方免費 T86，涵蓋全部上市股票）---
+    t86_rows, latest_date = fetch_twse_t86()
+    if not t86_rows:
+        return jsonify({"status": 500, "msg": "無法取得 TWSE 法人買賣超資料（近期無交易日資料或連線失敗）"}), 500
 
-    # --- Step 2: 取得最近交易日的法人買賣超（個股層級）---
-    end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+    def _num(v):
+        try:
+            return int(str(v).replace(",", "").strip() or 0)
+        except Exception:
+            return 0
 
-    raw, err = finmind_get({
-        "dataset": "TaiwanStockInstitutionalInvestorsBuySell",
-        "start_date": start_date,
-        "end_date": end_date,
-    }, timeout=60)
-    if err:
-        return jsonify({"status": 500, "msg": err}), 500
-
-    if not raw:
-        return jsonify({"status": 500, "msg": "法人買賣超資料為空"}), 500
-
-    # 找出最新交易日
-    latest_date = max(row.get("date", "") for row in raw if row.get("date"))
-
-    # 統計各股票的三大法人（外資+投信+自營商）合計淨買超（股）
-    stock_net = {}  # {stock_id: net}
-    for row in raw:
-        if row.get("date") != latest_date:
-            continue
-        sid = row.get("stock_id", "")
+    stock_rows = []
+    for row in t86_rows:
+        sid = (row.get("證券代號") or "").strip()
+        name = (row.get("證券名稱") or "").strip()
         if not sid:
             continue
-        buy = row.get("buy", 0) or 0
-        sell = row.get("sell", 0) or 0
-        stock_net[sid] = stock_net.get(sid, 0) + (buy - sell)
+        net = round(_num(row.get("三大法人買賣超股數")) / 1000)  # 股 → 張
+        stock_rows.append({"stock_id": sid, "name": name, "net": net})
 
-    if not stock_net:
+    if not stock_rows:
         return jsonify({"status": 500, "msg": "查無最新交易日的法人買賣超資料"}), 500
 
-    sorted_stocks = sorted(stock_net.items(), key=lambda x: x[1], reverse=True)
+    sorted_stocks = sorted(stock_rows, key=lambda x: x["net"], reverse=True)
 
-    top10_buy = [
-        {"stock_id": s[0], "name": name_map.get(s[0], ""), "net": s[1]}
-        for s in sorted_stocks[:10]
-        if s[1] > 0
-    ]
-    top10_sell = [
-        {"stock_id": s[0], "name": name_map.get(s[0], ""), "net": s[1]}
-        for s in sorted(sorted_stocks, key=lambda x: x[1])[:10]
-        if s[1] < 0
-    ]
+    top10_buy = [s for s in sorted_stocks[:10] if s["net"] > 0]
+    top10_sell = [s for s in sorted(sorted_stocks, key=lambda x: x["net"])[:10] if s["net"] < 0]
 
     result = {
         "date": latest_date,
