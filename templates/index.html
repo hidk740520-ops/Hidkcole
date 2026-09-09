@@ -317,6 +317,9 @@ function doSearch() {
     infoPromise = Promise.resolve();
   } else {
     infoPromise = fetchFinMind('TaiwanStockInfo').then(function(j){
+      if (j.status && j.status !== 200) {
+        throw new Error(j.msg || 'FinMind API 錯誤，請稍後再試');
+      }
       var d = j.data || [];
       for (var i = 0; i < d.length; i++) {
         if (d[i].stock_name && d[i].stock_name.indexOf(input) >= 0) {
@@ -327,6 +330,9 @@ function doSearch() {
         }
       }
       if (!G.stockId) {
+        if (!d.length) {
+          throw new Error('無法取得股票名稱清單，請稍後再試');
+        }
         throw new Error('找不到股票名稱：' + input);
       }
     });
