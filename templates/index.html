@@ -241,6 +241,20 @@ tr:last-child td{border-bottom:none}
   </div>
 </div>
 
+<!-- ===== 策略回測報告（獨立功能，不隨股票搜尋觸發）===== -->
+<div class="card" style="margin-top:16px">
+  <div class="card-title"><span class="icon">🧪</span>策略回測報告（短線・5支代表股・近~2年）</div>
+  <div class="card-body" id="backtestBody">
+    <div style="font-size:.85rem;color:var(--text-dim);margin-bottom:10px">
+      抓 2330台積電／2317鴻海／2454聯發科／2308台達電／2382廣達，近500天資料，
+      統計短線買進訊號出現後 5 個交易日的勝率與平均報酬。此為歷史統計，非未來績效保證，
+      結果會快取 24 小時。
+    </div>
+    <button class="btn btn-primary" id="backtestBtn" onclick="runBacktest()">執行回測分析</button>
+    <div id="backtestResult" style="margin-top:12px"></div>
+  </div>
+</div>
+
 </div><!-- /container -->
 
 <script>
@@ -278,9 +292,13 @@ function colorVal(n) {
   if (n < 0) return 'neg';
   return 'neutral';
 }
-function scoreBadge(s) {
+function scoreBadge(s, maxAbs) {
   var cls = s > 0 ? 'score-pos' : (s < 0 ? 'score-neg' : 'score-neu');
   var sign = s > 0 ? '+' : '';
+  if (maxAbs && maxAbs > 0) {
+    var pct = Math.round((s + maxAbs) / (2 * maxAbs) * 100);
+    return '<span class="score-badge ' + cls + '">' + pct + '%（' + sign + s + '）</span>';
+  }
   return '<span class="score-badge ' + cls + '">' + sign + s + '</span>';
 }
 function loadingHtml(msg) {
@@ -411,7 +429,14 @@ function fetchTechData() {
     url += '&buy_price=' + encodeURIComponent(buyPrice);
     var shares = document.getElementById('sharesInput').value;
     if (shares) url += '&shares=' + encodeURIComponent(shares);
-    var strategyPref = document.querySelector('input[name="strategyPref"]:checked').value;
+    // 改用 getElementsByName 而非 querySelector([name=...]:checked)，
+    // 避免部分 Safari 版本對屬性選擇器語法過於嚴格而拋出
+    // "The string did not match the expected pattern" 錯誤
+    var radios = document.getElementsByName('strategyPref');
+    var strategyPref = 'short';
+    for (var ri = 0; ri < radios.length; ri++) {
+      if (radios[ri].checked) { strategyPref = radios[ri].value; break; }
+    }
     url += '&strategy_pref=' + encodeURIComponent(strategyPref);
   }
   return fetch(url)
@@ -438,6 +463,7 @@ function fetchTechData() {
         sell: { low: j.trade_points.sell_low, high: j.trade_points.sell_high },
         stopLoss: j.trade_points.stop_loss,
         score: j.score,
+        scoreMax: j.score_max,
         strategy: j.strategy || null,
         valuation: j.valuation || null,
         position: j.position || null
@@ -678,7 +704,7 @@ function renderTech() {
   html += '<div class="indicator-row"><span class="ind-label">🔴 建議賣出區間</span><span class="ind-value neg">' + fmt(t.sell.low) + ' ~ ' + fmt(t.sell.high) + '</span></div>';
   html += '<div class="indicator-row"><span class="ind-label">🛑 建議停損點</span><span class="ind-value neg">' + fmt(t.stopLoss) + '</span></div>';
 
-  html += '<div style="margin-top:8px">技術面評分 ' + scoreBadge(t.score) + '</div>';
+  html += '<div style="margin-top:8px">技術面評分 ' + scoreBadge(t.score, t.scoreMax) + '</div>';
 
   el.innerHTML = html;
 }
@@ -693,6 +719,7 @@ function renderFund() {
   }
 
   var score = 0;
+  var scoreMax = 0;
   var html = '';
 
   // 營收
@@ -717,11 +744,24 @@ function renderFund() {
     html += '<tr><th>營收（千元）</th><td class="mono">' + fmtInt(latest.revenue) + '</td></tr>';
     if (mom !== null) {
       html += '<tr><th>月增率 MoM</th><td class="mono ' + (mom > 0 ? 'pos' : 'neg') + '">' + (mom > 0 ? '+' : '') + fmt(mom, 1) + '%</td></tr>';
-      score += mom > 0 ? 1 : -1;
     }
     if (yoy !== null) {
       html += '<tr><th>年增率 YoY</th><td class="mono ' + (yoy > 0 ? 'pos' : 'neg') + '">' + (yoy > 0 ? '+' : '') + fmt(yoy, 1) + '%</td></tr>';
+      // YoY 控制了季節性，作為主要營收訊號
       score += yoy > 0 ? 1 : -1;
+      scoreMax += 1;
+      // MoM 受季節性干擾較大（年節、季底出貨等），僅在與YoY同方向時
+      // 視為「趨勢加速/惡化」的輔助佐證才加減分，避免雜訊誤導
+      if (mom !== null) {
+        if ((mom > 0 && yoy > 0) || (mom < 0 && yoy < 0)) {
+          score += mom > 0 ? 1 : -1;
+        }
+        scoreMax += 1;
+      }
+    } else if (mom !== null) {
+      // 沒有YoY可比對時（新股等），才退回用MoM作主要訊號
+      score += mom > 0 ? 1 : -1;
+      scoreMax += 1;
     }
     html += '</table>';
   }
@@ -734,22 +774,28 @@ function renderFund() {
   }
 
   // PER / PBR 估算
+  // 優先使用估值引擎（用實際歷史本益比反推的EPS，較準），
+  // 沒有的話才退回用股利/假設配發率70%粗估（僅供備援，精準度較低）
   if (G.techData && G.techData.lastClose > 0) {
     var eps = null;
-    if (d.dividend.length > 0) {
-      // 粗略用股利估算（假設配發率 70%）
+    var epsSource = '';
+    if (G.techData.valuation && G.techData.valuation.eps) {
+      eps = G.techData.valuation.eps;
+      epsSource = '（估值引擎）';
+    } else if (d.dividend.length > 0) {
       var div = d.dividend[d.dividend.length-1].CashDividends;
-      if (div > 0) eps = div / 0.7;
+      if (div > 0) { eps = div / 0.7; epsSource = '（股利粗估，僅供參考）'; }
     }
     if (eps && eps > 0) {
       var per = G.techData.lastClose / eps;
-      html += '<div class="indicator-row"><span class="ind-label">估算 PER</span><span class="ind-value ' + (per < 15 ? 'pos' : (per > 25 ? 'neg' : 'neutral')) + '">' + fmt(per, 1) + ' 倍</span></div>';
+      html += '<div class="indicator-row"><span class="ind-label">估算 PER' + epsSource + '</span><span class="ind-value ' + (per < 15 ? 'pos' : (per > 25 ? 'neg' : 'neutral')) + '">' + fmt(per, 1) + ' 倍</span></div>';
       score += per < 15 ? 1 : (per > 25 ? -1 : 0);
+      scoreMax += 1;
     }
   }
 
   G.scores.fund = score;
-  html += '<div style="margin-top:8px">基本面評分 ' + scoreBadge(score) + '</div>';
+  html += '<div style="margin-top:8px">基本面評分 ' + scoreBadge(score, scoreMax) + '</div>';
   el.innerHTML = html;
 }
 
@@ -763,6 +809,7 @@ function renderChip() {
   }
 
   var score = 0;
+  var scoreMax = 0;
   var html = '';
 
   // 法人買賣超（最近交易日）
@@ -792,8 +839,12 @@ function renderChip() {
 
     var totalInst = fiNet + itNet + dlNet;
     score += totalInst > 0 ? 2 : (totalInst < 0 ? -2 : 0);
-    if (fiNet > 0) score += 1;
-    if (itNet > 0) score += 1;
+    scoreMax += 2;
+    // 原本只有「買超才加分」，賣超卻不扣分，會偏多頭；改成對稱加減分
+    if (fiNet > 0) score += 1; else if (fiNet < 0) score -= 1;
+    scoreMax += 1;
+    if (itNet > 0) score += 1; else if (itNet < 0) score -= 1;
+    scoreMax += 1;
   }
 
   // 融資融券
@@ -807,10 +858,22 @@ function renderChip() {
     html += '<tr><th>融券賣出</th><td class="mono">' + fmtInt(m.ShortSaleSell || 0) + ' 張</td></tr>';
     html += '<tr><th>融券買進</th><td class="mono">' + fmtInt(m.ShortSaleBuy || 0) + ' 張</td></tr>';
     html += '</table>';
+
+    // 原本融資融券資料只顯示、完全沒進評分，浪費了一個籌碼訊號：
+    // 融資餘額與股價背離時，代表散戶籌碼與趨勢不同步（風險訊號）
+    var marginNet = (m.MarginPurchaseBuy || 0) - (m.MarginPurchaseSell || 0);
+    if (G.techData && G.techData.change != null && marginNet !== 0) {
+      if (marginNet > 0 && G.techData.change < 0) {
+        score -= 1; // 股價跌，融資卻逆勢增加 → 散戶籌碼偏弱訊號
+      } else if (marginNet < 0 && G.techData.change > 0) {
+        score += 1; // 股價漲，融資卻減少 → 籌碼健康、賣壓已消化
+      }
+      scoreMax += 1;
+    }
   }
 
   G.scores.chip = score;
-  html += '<div style="margin-top:8px">籌碼面評分 ' + scoreBadge(score) + '</div>';
+  html += '<div style="margin-top:8px">籌碼面評分 ' + scoreBadge(score, scoreMax) + '</div>';
   el.innerHTML = html;
 }
 
@@ -1083,6 +1146,61 @@ function buildReasons(tech, fund, chip, us, total) {
 // ===========================================================================
 // 初始化
 // ===========================================================================
+// ===========================================================================
+// 策略回測報告（獨立功能，需手動點按鈕觸發，不隨股票搜尋自動執行）
+// ===========================================================================
+function runBacktest() {
+  var btn = document.getElementById('backtestBtn');
+  var resEl = document.getElementById('backtestResult');
+  btn.disabled = true;
+  btn.textContent = '分析中...（可能需 10~30 秒）';
+  resEl.innerHTML = loadingHtml('正在回測 5 支股票的歷史訊號...');
+
+  fetch('/api/backtest')
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      btn.disabled = false;
+      btn.textContent = '重新執行回測分析';
+      if (j.status !== 200) {
+        resEl.innerHTML = errHtml(j.msg || '回測失敗');
+        return;
+      }
+      var html = '';
+      if (j.overall && j.overall.total_signals > 0) {
+        var owCls = j.overall.win_rate >= 50 ? 'pos' : 'neg';
+        html += '<div style="background:var(--card2);border-radius:8px;padding:12px;margin-bottom:12px">';
+        html += '<div style="font-size:.85rem;color:var(--text-dim)">整體統計（5支合計 ' + j.overall.total_signals + ' 次訊號）</div>';
+        html += '<div style="font-size:1.3rem;font-weight:700" class="' + owCls + '">勝率 ' + fmt(j.overall.win_rate,1) + '%</div>';
+        html += '<div style="font-size:.9rem">平均報酬（' + j.hold_days + '個交易日）：<span class="mono ' + (j.overall.avg_return>=0?'pos':'neg') + '">' + (j.overall.avg_return>=0?'+':'') + fmt(j.overall.avg_return,2) + '%</span></div>';
+        html += '</div>';
+      } else {
+        html += '<div class="placeholder">近期資料中沒有觸發任何短線買進訊號</div>';
+      }
+
+      html += '<table><tr><th>股票</th><th>訊號次數</th><th>勝率</th><th>平均報酬</th></tr>';
+      j.stocks.forEach(function(s){
+        if (s.error) {
+          html += '<tr><td>' + s.stock_id + '</td><td colspan="3" style="color:var(--text-dim)">⚠ ' + s.error + '</td></tr>';
+        } else if (!s.signal_count) {
+          html += '<tr><td>' + s.stock_id + '</td><td colspan="3" style="color:var(--text-dim)">近期無訊號</td></tr>';
+        } else {
+          var wCls = s.win_rate >= 50 ? 'pos' : 'neg';
+          html += '<tr><td>' + s.stock_id + '</td><td class="mono">' + s.signal_count + '</td>' +
+                  '<td class="mono ' + wCls + '">' + fmt(s.win_rate,1) + '%</td>' +
+                  '<td class="mono ' + (s.avg_return>=0?'pos':'neg') + '">' + (s.avg_return>=0?'+':'') + fmt(s.avg_return,2) + '%</td></tr>';
+        }
+      });
+      html += '</table>';
+      html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 僅回測短線策略（KD(5,3,3)+5MA+爆量+避開營收公佈期），歷史統計不代表未來績效，結果快取24小時' + (j.cached ? '（本次為快取結果）' : '') + '</div>';
+      resEl.innerHTML = html;
+    })
+    .catch(function(err){
+      btn.disabled = false;
+      btn.textContent = '重新執行回測分析';
+      resEl.innerHTML = errHtml(err.message || '回測請求失敗');
+    });
+}
+
 document.getElementById('stockInput').focus();
 document.getElementById('entryDateInput').addEventListener('change', function(){
   if (G.stockId) doSearch();
