@@ -430,6 +430,10 @@ def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
     HOLD（持有）／ADD（可補倉）／REDUCE（停利／減碼）／STOP（建議停損）
     """
     profit_pct = round((close - buy_price) / buy_price * 100, 2) if buy_price else None
+    profit_amount = None
+    if buy_price and shares:
+        # 張數 × 1000 = 股數；零股可填小數，例如 100股 = 0.1張
+        profit_amount = round((close - buy_price) * shares * 1000, 0)
     sig = short_sig if strategy_pref == "short" else mid_sig
     action = sig["action"]
 
@@ -476,6 +480,7 @@ def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
 
     return {
         "profit_pct": profit_pct,
+        "profit_amount": profit_amount,
         "status": status,
         "status_label": status_label,
         "add_action": add_action,
@@ -486,7 +491,7 @@ def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
     }
 
 
-
+def build_strategy_signals(latest, prev, weekly_kd, revenue_yoy, vol_ma20, day_of_month, df=None, entry_date=None):
     """
     依照短線（3~5天）與波段（2~3週）兩套策略計算買賣訊號與燈號。
     回傳 dict：{light, short:{action,reasons}, mid:{action,reasons}}
@@ -511,6 +516,7 @@ def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
     k9 = g(latest, "K")
     d9 = g(latest, "D")
     pk9 = g(prev, "K")
+    pd9 = g(prev, "D")
     volume = g(latest, "Volume")
     revenue_hot_period = 1 <= day_of_month <= 10
 
