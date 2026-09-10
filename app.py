@@ -842,20 +842,33 @@ def get_stock_data():
     score_pct = round((score + score_max) / (2 * score_max) * 100, 1) if score_max > 0 else 50.0
 
     # --- 策略訊號（短線3~5天 KD(5,3,3) ／ 波段2~3週 週KD(9,3,3)+日KD(9,3,3)+營收YoY）---
-    weekly_kd = calc_weekly_kd9(df)
-    revenue_yoy = fetch_revenue_yoy(stock_id)
-    entry_date = request.args.get("entry_date", "").strip() or None
-    strategy = build_strategy_signals(
-        latest, prev, weekly_kd, revenue_yoy,
-        float(latest["Vol_MA20"]) if latest["Vol_MA20"] is not None else None,
-        datetime.now().day,
-        df=df, entry_date=entry_date,
-    )
+    try:
+        weekly_kd = calc_weekly_kd9(df)
+        revenue_yoy = fetch_revenue_yoy(stock_id)
+        entry_date = request.args.get("entry_date", "").strip() or None
+        strategy = build_strategy_signals(
+            latest, prev, weekly_kd, revenue_yoy,
+            float(latest["Vol_MA20"]) if latest["Vol_MA20"] is not None else None,
+            datetime.now().day,
+            df=df, entry_date=entry_date,
+        )
+    except Exception:
+        strategy = {
+            "light": "neutral",
+            "short": {"action": "觀望", "reasons": ["策略訊號計算發生錯誤"]},
+            "mid": {"action": "觀望", "reasons": ["策略訊號計算發生錯誤"]},
+        }
 
     # --- 估值引擎（階段1：合理價格 / 合理買入上限 / 目標價）---
-    valuation = fetch_valuation(stock_id, float(latest["Close"]))
+    try:
+        valuation = fetch_valuation(stock_id, float(latest["Close"]))
+    except Exception:
+        valuation = None
 
     # --- 持股價格即時分析（選填，不存檔，當下輸入當下算）---
+    # 用 Exception 而非只抓 ValueError/TypeError，確保這個選填功能萬一
+    # 出現任何未預期錯誤，也只會讓「持股分析」這張卡片顯示不出來，
+    # 不會讓整支 /api/stock 回應失敗、拖累其他所有卡片一起當機
     position = None
     buy_price_arg = request.args.get("buy_price", "").strip()
     if buy_price_arg:
@@ -879,7 +892,7 @@ def get_stock_data():
                 float(latest["Vol_MA5"]) if latest["Vol_MA5"] is not None else None,
                 strategy["short"], strategy["mid"], valuation,
             )
-        except (ValueError, TypeError):
+        except Exception:
             position = None
 
     result = {
