@@ -140,8 +140,8 @@ tr:last-child td{border-bottom:none}
   <div style="margin-top:8px;font-size:.85rem;color:var(--text-dim);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <label for="buyPriceInput">我的買入價（選填，不存檔，僅供本次分析）：</label>
     <input type="number" step="0.01" id="buyPriceInput" placeholder="例如 1050" style="width:100px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
-    <label for="sharesInput">張數：</label>
-    <input type="number" step="0.001" id="sharesInput" placeholder="例如 1" style="width:80px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
+    <label for="sharesInput">張數（可小數，零股如100股請填0.1）：</label>
+    <input type="number" step="0.001" id="sharesInput" placeholder="例如 1 或 0.1" style="width:110px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
     <label><input type="radio" name="strategyPref" value="short" checked> 短線</label>
     <label><input type="radio" name="strategyPref" value="mid"> 波段</label>
   </div>
@@ -643,6 +643,11 @@ function renderPosition() {
     var pCls = p.profit_pct > 0 ? 'pos' : (p.profit_pct < 0 ? 'neg' : 'neutral');
     var pSign = p.profit_pct > 0 ? '+' : '';
     html += '<tr><th>目前損益</th><td class="mono ' + pCls + '">' + pSign + fmt(p.profit_pct,2) + '%</td></tr>';
+  }
+  if (p.profit_amount != null) {
+    var aCls = p.profit_amount > 0 ? 'pos' : (p.profit_amount < 0 ? 'neg' : 'neutral');
+    var aSign = p.profit_amount > 0 ? '+' : '';
+    html += '<tr><th>損益金額</th><td class="mono ' + aCls + '">' + aSign + fmtInt(p.profit_amount) + ' 元</td></tr>';
   }
   html += '<tr><th>補倉判斷</th><td>' + p.add_action + '</td></tr>';
   html += '<tr><th>賣出判斷</th><td>' + p.sell_action + '</td></tr>';
