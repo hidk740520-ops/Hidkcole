@@ -271,7 +271,85 @@ def fetch_revenue_yoy(stock_id):
         return None
 
 
-def fetch_valuation(stock_id, current_price):
+def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5):
+    """
+    短線策略歷史回測（單一股票）。
+    走訪歷史每一天，套用跟即時系統完全相同的短線買進條件，
+    若觸發，記錄「訊號後 hold_days 個交易日」的報酬率，
+    最後統計勝率與平均報酬。
+
+    注意：僅回測短線策略（不含波段），因為波段策略的營收年增率
+    條件需要重建歷史上「當時」的營收數字，複雜度高很多，先略過。
+    這是歷史數據統計，不代表未來績效。
+    """
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    raw, err = finmind_get({
+        "dataset": "TaiwanStockPrice",
+        "data_id": stock_id,
+        "start_date": start_date,
+        "end_date": end_date,
+    }, timeout=30)
+    if err:
+        return {"stock_id": stock_id, "error": err}
+    if not raw:
+        return {"stock_id": stock_id, "error": "查無股價資料"}
+
+    df = pd.DataFrame(raw)
+    try:
+        df["Close"] = pd.to_numeric(df["close"], errors="coerce")
+        df["High"] = pd.to_numeric(df["max"], errors="coerce")
+        df["Low"] = pd.to_numeric(df["min"], errors="coerce")
+        df["Open"] = pd.to_numeric(df["open"], errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Trading_Volume"], errors="coerce")
+        df["Date"] = df["date"]
+    except KeyError as e:
+        return {"stock_id": stock_id, "error": f"欄位缺失: {e}"}
+    df = df.dropna(subset=["Close"]).reset_index(drop=True)
+    if len(df) < 40:
+        return {"stock_id": stock_id, "error": "資料筆數不足"}
+
+    df = calculate_indicators(df)
+    df = df.where(pd.notnull(df), None)
+
+    signals = []
+    for i in range(1, len(df) - hold_days):
+        prev = df.iloc[i - 1]
+        cur = df.iloc[i]
+        vals = (cur["K5"], cur["D5"], prev["K5"], prev["D5"], cur["MA5"], prev["MA5"],
+                cur["Close"], cur["Volume"], cur["Vol_MA20"])
+        if any(v is None for v in vals):
+            continue
+        kd5_cross_up = prev["K5"] <= prev["D5"] and cur["K5"] > cur["D5"] and cur["K5"] < 50
+        ma5_up = cur["MA5"] >= prev["MA5"]
+        price_above_ma5 = cur["Close"] > cur["MA5"]
+        vol_ok = cur["Vol_MA20"] and cur["Volume"] > cur["Vol_MA20"]
+        try:
+            day_of_month = int(str(cur["Date"])[8:10])
+        except Exception:
+            day_of_month = 15
+        not_hot = not (1 <= day_of_month <= 10)
+
+        if kd5_cross_up and price_above_ma5 and ma5_up and vol_ok and not_hot:
+            entry_price = float(cur["Close"])
+            exit_price = float(df.iloc[i + hold_days]["Close"])
+            ret = round((exit_price - entry_price) / entry_price * 100, 2)
+            signals.append({"date": cur["Date"], "entry": entry_price, "exit": exit_price, "return_pct": ret})
+
+    if not signals:
+        return {"stock_id": stock_id, "signal_count": 0, "win_rate": None, "avg_return": None, "signals": []}
+
+    wins = sum(1 for s in signals if s["return_pct"] > 0)
+    return {
+        "stock_id": stock_id,
+        "signal_count": len(signals),
+        "win_rate": round(wins / len(signals) * 100, 1),
+        "avg_return": round(sum(s["return_pct"] for s in signals) / len(signals), 2),
+        "signals": signals[-5:],  # 只回傳最近5筆訊號明細，避免回應過大
+    }
+
+
+
     """
     估值引擎（簡化版 P/E Band）：
     抓近 3 年 TaiwanStockPER（FinMind 免費資料集），取歷史本益比的
@@ -688,31 +766,74 @@ def get_stock_data():
     vol_ratio = last_vol / avg_vol5 if avg_vol5 > 0 else 1.0
 
     # --- 技術面評分 ---
+    # 設計說明：
+    # 1) 均線排列(MA5/MA10/MA20)高度相關，合併成單一「趨勢」子分數，
+    #    避免同一件事（多頭排列）被重複計分、稀釋其他獨立訊號的權重
+    # 2) KD 加入「訊號新鮮度」（剛黃金/死亡交叉）作為動能加權
+    # 3) 動態計算本次可達最大值 score_max，供百分比換算使用
     score = 0
+    score_max = 0
+
+    bull_count = 0
+    ma_pairs_available = 0
     if latest["MA5"] is not None and latest["MA10"] is not None:
-        score += 1 if latest["MA5"] > latest["MA10"] else -1
+        ma_pairs_available += 1
+        if latest["MA5"] > latest["MA10"]:
+            bull_count += 1
     if latest["MA10"] is not None and latest["MA20"] is not None:
-        score += 1 if latest["MA10"] > latest["MA20"] else -1
+        ma_pairs_available += 1
+        if latest["MA10"] > latest["MA20"]:
+            bull_count += 1
     if latest["MA20"] is not None:
-        score += 1 if latest["Close"] > latest["MA20"] else -1
+        ma_pairs_available += 1
+        if latest["Close"] > latest["MA20"]:
+            bull_count += 1
+    if ma_pairs_available > 0:
+        trend_score = round((2 * bull_count - ma_pairs_available) * (2.0 / ma_pairs_available))
+        score += trend_score
+        score_max += 2
+
     if latest["MA60"] is not None:
         score += 1 if latest["Close"] > latest["MA60"] else -1
+        score_max += 1
+
     if latest["K"] is not None and latest["D"] is not None:
         score += 1 if latest["K"] > latest["D"] else -1
+        score_max += 1
+        if kd_cross == "黃金交叉":
+            score += 1
+        elif kd_cross == "死亡交叉":
+            score -= 1
+        score_max += 1
         if latest["K"] < 20:
             score += 1
         elif latest["K"] > 80:
             score -= 1
+        score_max += 1
+
     if latest["MACD_Hist"] is not None:
         score += 1 if latest["MACD_Hist"] > 0 else -1
+        score_max += 1
+
     if "偏低" in bb_pos:
         score += 1
+        score_max += 1
     elif "偏高" in bb_pos:
         score -= 1
+        score_max += 1
+    else:
+        score_max += 1
+
     if vol_ratio > 1.5:
         score += 1
+        score_max += 1
     elif vol_ratio < 0.5:
         score -= 1
+        score_max += 1
+    else:
+        score_max += 1
+
+    score_pct = round((score + score_max) / (2 * score_max) * 100, 1) if score_max > 0 else 50.0
 
     # --- 策略訊號（短線3~5天 KD(5,3,3) ／ 波段2~3週 週KD(9,3,3)+日KD(9,3,3)+營收YoY）---
     weekly_kd = calc_weekly_kd9(df)
@@ -806,6 +927,8 @@ def get_stock_data():
             "stop_loss": round(float(stop_loss), 2),
         },
         "score": score,
+        "score_max": score_max,
+        "score_pct": score_pct,
         "strategy": strategy,
         "valuation": valuation,
         "position": position,
@@ -946,6 +1069,65 @@ def get_us_market():
     if not results:
         return jsonify({"status": 500, "msg": "無法取得美股資料", "data": []}), 500
     return jsonify({"status": 200, "data": results})
+
+
+# ===========================================================================
+# 全域 cache（用於 /api/backtest，TTL 24 小時 — 回測資料不需要即時）
+# ===========================================================================
+_backtest_cache = {"data": None, "ts": 0}
+_BACKTEST_TTL = 86400  # 24 小時
+
+
+# ===========================================================================
+# /api/backtest — 短線策略歷史回測（5支代表性電子股，近~2年）
+# ===========================================================================
+@app.route("/api/backtest")
+def get_backtest():
+    now_ts = time.time()
+    if (
+        _backtest_cache["data"] is not None
+        and (now_ts - _backtest_cache["ts"]) < _BACKTEST_TTL
+    ):
+        return jsonify({"status": 200, "cached": True, **_backtest_cache["data"]})
+
+    # 5 支代表性電子/半導體股（可自行調整）
+    default_stocks = ["2330", "2317", "2454", "2308", "2382"]
+    lookback_days = 500
+    hold_days = 5
+
+    results = []
+    for sid in default_stocks:
+        try:
+            r = backtest_short_strategy(sid, lookback_days=lookback_days, hold_days=hold_days)
+        except Exception as e:
+            r = {"stock_id": sid, "error": str(e)}
+        results.append(r)
+
+    valid = [r for r in results if r.get("signal_count", 0) > 0]
+    total_signals = sum(r["signal_count"] for r in valid)
+    overall_win_rate = None
+    overall_avg_return = None
+    if total_signals > 0:
+        total_wins = sum(r["win_rate"] / 100 * r["signal_count"] for r in valid)
+        overall_win_rate = round(total_wins / total_signals * 100, 1)
+        overall_avg_return = round(
+            sum(r["avg_return"] * r["signal_count"] for r in valid) / total_signals, 2
+        )
+
+    result = {
+        "period_days": lookback_days,
+        "hold_days": hold_days,
+        "stocks": results,
+        "overall": {
+            "total_signals": total_signals,
+            "win_rate": overall_win_rate,
+            "avg_return": overall_avg_return,
+        },
+    }
+
+    _backtest_cache["data"] = result
+    _backtest_cache["ts"] = now_ts
+    return jsonify({"status": 200, "cached": False, **result})
 
 
 # ===========================================================================
