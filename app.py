@@ -239,11 +239,23 @@ def calc_weekly_kd9(df):
         return None
 
 
+# 簡易記憶體快取（用於降低 FinMind API 用量 — 同一支股票短時間內
+# 重複查詢時不用重新打 API，直接吃快取，大幅減少每小時的請求數）
+_revenue_cache = {}   # {stock_id: (ts, value)}
+_per_stats_cache = {}  # {stock_id: (ts, value)}
+_REVENUE_CACHE_TTL = 86400   # 24小時（月營收一個月才更新一次）
+_PER_CACHE_TTL = 43200       # 12小時
+
+
 def fetch_revenue_yoy(stock_id):
     """
     抓最近 14 個月營收，計算最新一筆的年增率 YoY(%)。
-    抓不到資料時回傳 None。
+    抓不到資料時回傳 None。結果快取 24 小時。
     """
+    now_ts = time.time()
+    cached = _revenue_cache.get(stock_id)
+    if cached and (now_ts - cached[0]) < _REVENUE_CACHE_TTL:
+        return cached[1]
     try:
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=440)).strftime("%Y-%m-%d")
@@ -254,21 +266,25 @@ def fetch_revenue_yoy(stock_id):
             "end_date": end_date,
         }, timeout=15)
         if not data:
-            return None
-        data = sorted(data, key=lambda r: (r.get("revenue_year", 0), r.get("revenue_month", 0)))
-        latest = data[-1]
-        ly, lm = latest.get("revenue_year"), latest.get("revenue_month")
-        same_month_last_year = None
-        for r in data[:-1]:
-            if r.get("revenue_year") == ly - 1 and r.get("revenue_month") == lm:
-                same_month_last_year = r
-                break
-        if not same_month_last_year or not same_month_last_year.get("revenue"):
-            return None
-        yoy = (latest["revenue"] - same_month_last_year["revenue"]) / same_month_last_year["revenue"] * 100
-        return round(float(yoy), 2)
+            result = None
+        else:
+            data = sorted(data, key=lambda r: (r.get("revenue_year", 0), r.get("revenue_month", 0)))
+            latest = data[-1]
+            ly, lm = latest.get("revenue_year"), latest.get("revenue_month")
+            same_month_last_year = None
+            for r in data[:-1]:
+                if r.get("revenue_year") == ly - 1 and r.get("revenue_month") == lm:
+                    same_month_last_year = r
+                    break
+            if not same_month_last_year or not same_month_last_year.get("revenue"):
+                result = None
+            else:
+                yoy = (latest["revenue"] - same_month_last_year["revenue"]) / same_month_last_year["revenue"] * 100
+                result = round(float(yoy), 2)
     except Exception:
-        return None
+        result = None
+    _revenue_cache[stock_id] = (now_ts, result)
+    return result
 
 
 def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5):
@@ -349,7 +365,7 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5):
     }
 
 
-
+def fetch_valuation(stock_id, current_price):
     """
     估值引擎（簡化版 P/E Band）：
     抓近 3 年 TaiwanStockPER（FinMind 免費資料集），取歷史本益比的
@@ -365,34 +381,60 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5):
     }
     """
     try:
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=1100)).strftime("%Y-%m-%d")  # 約 3 年
-        data, _err = finmind_get({
-            "dataset": "TaiwanStockPER",
-            "data_id": stock_id,
-            "start_date": start_date,
-            "end_date": end_date,
-        }, timeout=20)
-        if not data:
-            return None
+        now_ts = time.time()
+        cached = _per_stats_cache.get(stock_id)
+        if cached and (now_ts - cached[0]) < _PER_CACHE_TTL:
+            cached_val = cached[1]
+            if cached_val is None:
+                return None
+            if isinstance(cached_val, dict) and cached_val.get("_error"):
+                return cached_val
+            pe_low, pe_avg, pe_high, latest_per = cached_val
+        else:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            start_date = (datetime.now() - timedelta(days=1500)).strftime("%Y-%m-%d")  # 約 4 年，加大範圍以取得足夠樣本
+            data, _err = finmind_get({
+                "dataset": "TaiwanStockPER",
+                "data_id": stock_id,
+                "start_date": start_date,
+                "end_date": end_date,
+            }, timeout=20)
+            if not data:
+                _per_stats_cache[stock_id] = (now_ts, None)
+                return None
 
-        data = sorted(data, key=lambda r: r.get("date", ""))
-        pe_list = [r.get("PER") for r in data if r.get("PER") and r.get("PER") > 0]
-        if len(pe_list) < 10:
-            return None
+            data = sorted(data, key=lambda r: r.get("date", ""))
+            total_records = len(data)
+            pe_list = [r.get("PER") for r in data if r.get("PER") and r.get("PER") > 0]
 
-        latest_per = None
-        for r in reversed(data):
-            if r.get("PER") and r.get("PER") > 0:
-                latest_per = r["PER"]
-                break
-        if not latest_per:
-            return None
+            # 門檻放寬到 5 筆（原本 10 筆太嚴格，部分股票資料頻率較低就會被擋掉）
+            if len(pe_list) < 5:
+                if total_records > 0 and len(pe_list) == 0:
+                    # 有資料但本益比全部是負值／0：代表這段期間持續虧損，
+                    # 本益比估值法本來就不適用，這是合理限制而非資料不足
+                    err = {"_error": True, "msg": "近期本益比多為負值（可能持續虧損），本益比估值法不適用於這檔股票"}
+                else:
+                    err = {"_error": True, "msg": f"本益比歷史樣本不足（僅 {len(pe_list)} 筆有效資料，需至少 5 筆）"}
+                _per_stats_cache[stock_id] = (now_ts, err)
+                return err
 
+            latest_per = None
+            for r in reversed(data):
+                if r.get("PER") and r.get("PER") > 0:
+                    latest_per = r["PER"]
+                    break
+            if not latest_per:
+                err = {"_error": True, "msg": "查無最新本益比資料"}
+                _per_stats_cache[stock_id] = (now_ts, err)
+                return err
+
+            pe_low = min(pe_list)
+            pe_high = max(pe_list)
+            pe_avg = sum(pe_list) / len(pe_list)
+            _per_stats_cache[stock_id] = (now_ts, (pe_low, pe_avg, pe_high, latest_per))
+
+        # 本益比歷史統計走快取，但 EPS／合理價格用「當下」股價現算，避免用到過期股價
         eps = current_price / latest_per
-        pe_low = min(pe_list)
-        pe_high = max(pe_list)
-        pe_avg = sum(pe_list) / len(pe_list)
 
         reasonable_price = eps * pe_avg
         buy_ceiling = eps * pe_avg * 1.1
@@ -446,7 +488,7 @@ def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
     stop_ref = ma5 if strategy_pref == "short" else ma20
     stop_loss = round(stop_ref, 2) if stop_ref is not None else None
     take_profit = None
-    if valuation:
+    if valuation and not valuation.get("_error"):
         take_profit = valuation["target_price"]
     elif recent_high5 is not None:
         take_profit = round(recent_high5 * 1.05, 2)
@@ -1093,7 +1135,7 @@ def get_us_market():
 # ===========================================================================
 # 全域 cache（用於 /api/backtest，TTL 24 小時 — 回測資料不需要即時）
 # ===========================================================================
-_backtest_cache = {"data": None, "ts": 0}
+_backtest_cache = {}  # {cache_key: (ts, result)} — key 依所選股票組合區分
 _BACKTEST_TTL = 86400  # 24 小時
 
 
@@ -1102,20 +1144,30 @@ _BACKTEST_TTL = 86400  # 24 小時
 # ===========================================================================
 @app.route("/api/backtest")
 def get_backtest():
-    now_ts = time.time()
-    if (
-        _backtest_cache["data"] is not None
-        and (now_ts - _backtest_cache["ts"]) < _BACKTEST_TTL
-    ):
-        return jsonify({"status": 200, "cached": True, **_backtest_cache["data"]})
-
-    # 5 支代表性電子/半導體股（可自行調整）
+    # 支援自訂股票（最多5支，逗號分隔，例如 ?stocks=2330,2603,3037）
+    # 沒有帶 stocks 參數時，沿用預設的 5 支代表性電子股
     default_stocks = ["2330", "2317", "2454", "2308", "2382"]
+    stocks_arg = request.args.get("stocks", "").strip()
+    if stocks_arg:
+        requested = [s.strip() for s in stocks_arg.split(",") if s.strip()]
+        # 只接受純數字股票代號，避免不合法輸入；最多5支，避免一次打太多API
+        target_stocks = [s for s in requested if s.isdigit()][:5]
+        if not target_stocks:
+            return jsonify({"status": 400, "msg": "股票代號格式錯誤，請輸入數字代號並用逗號分隔（最多5支）"}), 400
+    else:
+        target_stocks = default_stocks
+
+    cache_key = ",".join(sorted(target_stocks))
+    now_ts = time.time()
+    cached = _backtest_cache.get(cache_key)
+    if cached and (now_ts - cached[0]) < _BACKTEST_TTL:
+        return jsonify({"status": 200, "cached": True, **cached[1]})
+
     lookback_days = 500
     hold_days = 5
 
     results = []
-    for sid in default_stocks:
+    for sid in target_stocks:
         try:
             r = backtest_short_strategy(sid, lookback_days=lookback_days, hold_days=hold_days)
         except Exception as e:
@@ -1144,8 +1196,7 @@ def get_backtest():
         },
     }
 
-    _backtest_cache["data"] = result
-    _backtest_cache["ts"] = now_ts
+    _backtest_cache[cache_key] = (now_ts, result)
     return jsonify({"status": 200, "cached": False, **result})
 
 
