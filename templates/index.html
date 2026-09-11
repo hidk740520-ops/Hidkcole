@@ -246,9 +246,13 @@ tr:last-child td{border-bottom:none}
   <div class="card-title"><span class="icon">🧪</span>策略回測報告（短線・5支代表股・近~2年）</div>
   <div class="card-body" id="backtestBody">
     <div style="font-size:.85rem;color:var(--text-dim);margin-bottom:10px">
-      抓 2330台積電／2317鴻海／2454聯發科／2308台達電／2382廣達，近500天資料，
+      預設抓 2330台積電／2317鴻海／2454聯發科／2308台達電／2382廣達，近500天資料，
       統計短線買進訊號出現後 5 個交易日的勝率與平均報酬。此為歷史統計，非未來績效保證，
       結果會快取 24 小時。
+    </div>
+    <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <label for="backtestStocksInput" style="font-size:.85rem;color:var(--text-dim)">自訂股票（選填，逗號分隔，最多5支）：</label>
+      <input type="text" id="backtestStocksInput" placeholder="例如 2330,2603,3037" style="width:180px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
     </div>
     <button class="btn btn-primary" id="backtestBtn" onclick="runBacktest()">執行回測分析</button>
     <div id="backtestResult" style="margin-top:12px"></div>
@@ -606,6 +610,10 @@ function renderValuation() {
   if (!G.techData) { el.innerHTML = '<div class="placeholder">輸入股票代號開始健診</div>'; return; }
   if (!v) {
     el.innerHTML = errHtml('本益比歷史資料不足，無法計算估值區間');
+    return;
+  }
+  if (v._error) {
+    el.innerHTML = errHtml(v.msg || '無法計算估值區間');
     return;
   }
   var html = '<table style="margin-bottom:8px">';
@@ -1157,11 +1165,14 @@ function buildReasons(tech, fund, chip, us, total) {
 function runBacktest() {
   var btn = document.getElementById('backtestBtn');
   var resEl = document.getElementById('backtestResult');
+  var stocksInput = document.getElementById('backtestStocksInput').value.trim();
+  var url = '/api/backtest';
+  if (stocksInput) url += '?stocks=' + encodeURIComponent(stocksInput);
   btn.disabled = true;
   btn.textContent = '分析中...（可能需 10~30 秒）';
-  resEl.innerHTML = loadingHtml('正在回測 5 支股票的歷史訊號...');
+  resEl.innerHTML = loadingHtml('正在回測歷史訊號...');
 
-  fetch('/api/backtest')
+  fetch(url)
     .then(function(r){ return r.json(); })
     .then(function(j){
       btn.disabled = false;
@@ -1174,7 +1185,7 @@ function runBacktest() {
       if (j.overall && j.overall.total_signals > 0) {
         var owCls = j.overall.win_rate >= 50 ? 'pos' : 'neg';
         html += '<div style="background:var(--card2);border-radius:8px;padding:12px;margin-bottom:12px">';
-        html += '<div style="font-size:.85rem;color:var(--text-dim)">整體統計（5支合計 ' + j.overall.total_signals + ' 次訊號）</div>';
+        html += '<div style="font-size:.85rem;color:var(--text-dim)">整體統計（' + j.stocks.length + '支合計 ' + j.overall.total_signals + ' 次訊號）</div>';
         html += '<div style="font-size:1.3rem;font-weight:700" class="' + owCls + '">勝率 ' + fmt(j.overall.win_rate,1) + '%</div>';
         html += '<div style="font-size:.9rem">平均報酬（' + j.hold_days + '個交易日）：<span class="mono ' + (j.overall.avg_return>=0?'pos':'neg') + '">' + (j.overall.avg_return>=0?'+':'') + fmt(j.overall.avg_return,2) + '%</span></div>';
         html += '</div>';
