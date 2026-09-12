@@ -489,19 +489,17 @@ function fetchTechData() {
 
 // --- 基本面：營收、PER/PBR ---
 function fetchFundData() {
+  // V2.4.1：營收已由 /api/stock 同批取得，不再重複向 FinMind 請求。
+  var revenue = (G.techData && G.techData.revenueData) ? G.techData.revenueData : [];
   var end = new Date();
   var start = new Date();
   start.setFullYear(start.getFullYear() - 1);
   var sd = start.toISOString().slice(0,10);
   var ed = end.toISOString().slice(0,10);
-  var p1 = fetchFinMind('TaiwanStockMonthRevenue', G.stockId, sd, ed);
-  var p2 = fetchFinMind('TaiwanStockStockDividend', G.stockId, sd, ed);
-  return Promise.all([p1, p2]).then(function(results){
-    G.fundData = {
-      revenue: results[0].data || [],
-      dividend: results[1].data || [],
-    };
-  }).catch(function(){ G.fundData = { revenue: [], dividend: [] }; });
+  var p = fetchFinMind('TaiwanStockStockDividend', G.stockId, sd, ed);
+  return p.then(function(j){
+    G.fundData = { revenue: revenue, dividend: j.data || [] };
+  }).catch(function(){ G.fundData = { revenue: revenue, dividend: [] }; });
 }
 
 // --- 籌碼面：法人買賣超、融資 ---
