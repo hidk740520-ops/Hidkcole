@@ -1331,8 +1331,22 @@ function runBacktest() {
         html += '<div style="font-size:.9rem">平均淨報酬（' + j.hold_days + '個交易日）：<span class="mono ' + (j.overall.avg_net_return>=0?'pos':'neg') + '">' + (j.overall.avg_net_return>=0?'+':'') + fmt(j.overall.avg_net_return,3) + '%</span></div>';
         html += '<div style="font-size:.9rem">訊號序列近似複利：<span class="mono ' + (j.overall.approx_compound_return>=0?'pos':'neg') + '">' + (j.overall.approx_compound_return>=0?'+':'') + fmt(j.overall.approx_compound_return,2) + '%</span>　最大回撤：<span class="mono neg">' + fmt(j.overall.max_drawdown,2) + '%</span></div>';
         html += '<div style="font-size:.9rem">總淨損益（1張／訊號）：<span class="mono ' + (j.overall.total_net_pnl>=0?'pos':'neg') + '">' + (j.overall.total_net_pnl>=0?'+':'') + fmtInt(j.overall.total_net_pnl) + ' 元</span></div>';
+        html += '<div style="font-size:.9rem">大盤環境校正後 Alpha 勝率：<span class="mono">' + fmt(j.overall.market_adjusted_win_rate,1) + '%</span></div>';
         html += '<div style="font-size:.85rem;color:var(--text-dim);margin-top:6px">交易成本合計：' + fmtInt(j.overall.total_trading_cost) + ' 元（買進手續費 ' + fmtInt(j.overall.total_buy_fee) + '／賣出手續費 ' + fmtInt(j.overall.total_sell_fee) + '／賣出證交稅 ' + fmtInt(j.overall.total_sell_tax) + '）</div>';
         html += '</div>';
+        if (j.overall.regime_stats) {
+          html += '<div style="background:var(--card2);border-radius:8px;padding:12px;margin-bottom:12px">';
+          html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:8px">大盤環境分層回測（訊號發生當日分類）</div>';
+          html += '<table><tr><th>大盤環境</th><th>訊號</th><th>淨勝率</th><th>平均淨報酬</th><th>平均 Alpha</th></tr>';
+          Object.keys(j.overall.regime_stats).forEach(function(k){
+            var x=j.overall.regime_stats[k];
+            html += '<tr><td>' + k + '</td><td class="mono">' + x.signals + '</td>' +
+                    '<td class="mono ' + (x.win_rate>=50?'pos':'neg') + '">' + fmt(x.win_rate,1) + '%</td>' +
+                    '<td class="mono ' + (x.avg_net_return>=0?'pos':'neg') + '">' + (x.avg_net_return>=0?'+':'') + fmt(x.avg_net_return,3) + '%</td>' +
+                    '<td class="mono ' + (x.avg_alpha>=0?'pos':'neg') + '">' + (x.avg_alpha>=0?'+':'') + fmt(x.avg_alpha,3) + '%</td></tr>';
+          });
+          html += '</table></div>';
+        }
       } else {
         html += '<div class="placeholder">近期資料中沒有觸發任何短線買進訊號</div>';
       }
@@ -1352,7 +1366,7 @@ function runBacktest() {
         }
       });
       html += '</table>';
-      html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 回測以每個訊號 1 張計算：買進手續費 0.1425%、賣出手續費 0.1425%、賣出證交稅 0.3%，均按元無條件捨去，未計券商折讓。整體「訊號序列近似複利」不代表實際資金可完全同步執行；歷史統計不代表未來績效，結果快取24小時' + (j.cached ? '（本次為快取結果）' : '') + '</div>';
+      html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 回測同時納入台灣加權指數大盤環境；訊號當日只使用當時已知資料，並以同期間大盤報酬計算 Alpha。回測以每個訊號 1 張計算：買進手續費 0.1425%、賣出手續費 0.1425%、賣出證交稅 0.3%，均按元無條件捨去，未計券商折讓。整體「訊號序列近似複利」不代表實際資金可完全同步執行；歷史統計不代表未來績效，結果快取24小時' + (j.cached ? '（本次為快取結果）' : '') + '</div>';
       resEl.innerHTML = html;
     })
     .catch(function(err){
