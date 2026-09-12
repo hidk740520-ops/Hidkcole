@@ -256,8 +256,8 @@ tr:last-child td{border-bottom:none}
   <div class="card-body" id="backtestBody">
     <div style="font-size:.85rem;color:var(--text-dim);margin-bottom:10px">
       預設抓 2330台積電／2317鴻海／2454聯發科／2308台達電／2382廣達，近500天資料，
-      統計短線買進訊號出現後 5 個交易日的勝率與平均報酬。此為歷史統計，非未來績效保證，
-      結果會快取 24 小時。
+      統計短線買進訊號出現後 5 個交易日的「毛／淨」績效；淨績效已計入買進手續費、賣出手續費與賣出證交稅。
+      此為歷史統計，非未來績效保證，結果會快取 24 小時。
     </div>
     <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
       <label for="backtestStocksInput" style="font-size:.85rem;color:var(--text-dim)">自訂股票（選填，逗號分隔，最多5支）：</label>
@@ -780,7 +780,15 @@ function renderPosition() {
   if (p.profit_amount != null) {
     var aCls = p.profit_amount > 0 ? 'pos' : (p.profit_amount < 0 ? 'neg' : 'neutral');
     var aSign = p.profit_amount > 0 ? '+' : '';
-    html += '<tr><th>損益金額</th><td class="mono ' + aCls + '">' + aSign + fmtInt(p.profit_amount) + ' 元</td></tr>';
+    html += '<tr><th>淨損益金額</th><td class="mono ' + aCls + '">' + aSign + fmtInt(p.profit_amount) + ' 元</td></tr>';
+  }
+  if (p.transaction_costs) {
+    var c = p.transaction_costs;
+    html += '<tr><th>原始買入總成本</th><td class="mono">' + fmtInt(c.original_buy_cost) + ' 元（含買進手續費 ' + fmtInt(c.buy_fee) + '）</td></tr>';
+    html += '<tr><th>預估賣出可拿回</th><td class="mono">' + fmtInt(c.net_proceeds) + ' 元</td></tr>';
+    html += '<tr><th>預估賣出手續費</th><td class="mono">' + fmtInt(c.sell_fee) + ' 元</td></tr>';
+    html += '<tr><th>預估賣出證交稅</th><td class="mono">' + fmtInt(c.sell_tax) + ' 元</td></tr>';
+    html += '<tr><th>毛損益／淨損益率</th><td class="mono">' + fmt(c.gross_pnl_amount,0) + ' 元／' + fmt(c.pnl_pct,3) + '%</td></tr>';
   }
   html += '<tr><th>補倉判斷</th><td>' + p.add_action + '</td></tr>';
   html += '<tr><th>賣出判斷</th><td>' + p.sell_action + '</td></tr>';
@@ -1318,29 +1326,33 @@ function runBacktest() {
       if (j.overall && j.overall.total_signals > 0) {
         var owCls = j.overall.win_rate >= 50 ? 'pos' : 'neg';
         html += '<div style="background:var(--card2);border-radius:8px;padding:12px;margin-bottom:12px">';
-        html += '<div style="font-size:.85rem;color:var(--text-dim)">整體統計（' + j.stocks.length + '支合計 ' + j.overall.total_signals + ' 次訊號）</div>';
-        html += '<div style="font-size:1.3rem;font-weight:700" class="' + owCls + '">勝率 ' + fmt(j.overall.win_rate,1) + '%</div>';
-        html += '<div style="font-size:.9rem">平均報酬（' + j.hold_days + '個交易日）：<span class="mono ' + (j.overall.avg_return>=0?'pos':'neg') + '">' + (j.overall.avg_return>=0?'+':'') + fmt(j.overall.avg_return,2) + '%</span></div>';
+        html += '<div style="font-size:.85rem;color:var(--text-dim)">整體策略績效（' + j.stocks.length + '支合計 ' + j.overall.total_signals + ' 次訊號）</div>';
+        html += '<div style="font-size:1.3rem;font-weight:700" class="' + owCls + '">淨勝率 ' + fmt(j.overall.net_win_rate,1) + '%</div>';
+        html += '<div style="font-size:.9rem">平均淨報酬（' + j.hold_days + '個交易日）：<span class="mono ' + (j.overall.avg_net_return>=0?'pos':'neg') + '">' + (j.overall.avg_net_return>=0?'+':'') + fmt(j.overall.avg_net_return,3) + '%</span></div>';
+        html += '<div style="font-size:.9rem">訊號序列近似複利：<span class="mono ' + (j.overall.approx_compound_return>=0?'pos':'neg') + '">' + (j.overall.approx_compound_return>=0?'+':'') + fmt(j.overall.approx_compound_return,2) + '%</span>　最大回撤：<span class="mono neg">' + fmt(j.overall.max_drawdown,2) + '%</span></div>';
+        html += '<div style="font-size:.9rem">總淨損益（1張／訊號）：<span class="mono ' + (j.overall.total_net_pnl>=0?'pos':'neg') + '">' + (j.overall.total_net_pnl>=0?'+':'') + fmtInt(j.overall.total_net_pnl) + ' 元</span></div>';
+        html += '<div style="font-size:.85rem;color:var(--text-dim);margin-top:6px">交易成本合計：' + fmtInt(j.overall.total_trading_cost) + ' 元（買進手續費 ' + fmtInt(j.overall.total_buy_fee) + '／賣出手續費 ' + fmtInt(j.overall.total_sell_fee) + '／賣出證交稅 ' + fmtInt(j.overall.total_sell_tax) + '）</div>';
         html += '</div>';
       } else {
         html += '<div class="placeholder">近期資料中沒有觸發任何短線買進訊號</div>';
       }
 
-      html += '<table><tr><th>股票</th><th>訊號次數</th><th>勝率</th><th>平均報酬</th></tr>';
+      html += '<table><tr><th>股票</th><th>訊號次數</th><th>淨勝率</th><th>平均淨報酬</th><th>交易成本</th></tr>';
       j.stocks.forEach(function(s){
         if (s.error) {
-          html += '<tr><td>' + s.stock_id + '</td><td colspan="3" style="color:var(--text-dim)">⚠ ' + s.error + '</td></tr>';
+          html += '<tr><td>' + s.stock_id + '</td><td colspan="4" style="color:var(--text-dim)">⚠ ' + s.error + '</td></tr>';
         } else if (!s.signal_count) {
-          html += '<tr><td>' + s.stock_id + '</td><td colspan="3" style="color:var(--text-dim)">近期無訊號</td></tr>';
+          html += '<tr><td>' + s.stock_id + '</td><td colspan="4" style="color:var(--text-dim)">近期無訊號</td></tr>';
         } else {
           var wCls = s.win_rate >= 50 ? 'pos' : 'neg';
           html += '<tr><td>' + s.stock_id + '</td><td class="mono">' + s.signal_count + '</td>' +
                   '<td class="mono ' + wCls + '">' + fmt(s.win_rate,1) + '%</td>' +
-                  '<td class="mono ' + (s.avg_return>=0?'pos':'neg') + '">' + (s.avg_return>=0?'+':'') + fmt(s.avg_return,2) + '%</td></tr>';
+                  '<td class="mono ' + (s.net_avg_return>=0?'pos':'neg') + '">' + (s.net_avg_return>=0?'+':'') + fmt(s.net_avg_return,3) + '%</td>' +
+                  '<td class="mono">' + fmtInt(s.total_trading_cost) + ' 元</td></tr>';
         }
       });
       html += '</table>';
-      html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 僅回測短線策略（KD(5,3,3)+5MA+爆量+避開營收公佈期），歷史統計不代表未來績效，結果快取24小時' + (j.cached ? '（本次為快取結果）' : '') + '</div>';
+      html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 回測以每個訊號 1 張計算：買進手續費 0.1425%、賣出手續費 0.1425%、賣出證交稅 0.3%，均按元無條件捨去，未計券商折讓。整體「訊號序列近似複利」不代表實際資金可完全同步執行；歷史統計不代表未來績效，結果快取24小時' + (j.cached ? '（本次為快取結果）' : '') + '</div>';
       resEl.innerHTML = html;
     })
     .catch(function(err){
