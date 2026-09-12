@@ -36,6 +36,60 @@ FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 # 可大幅降低「查無資料」其實是配額用盡／IP 被暫時限制的機率。
 FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "").strip()
 
+# ===========================================================================
+# 交易成本設定（依使用者目前規格）
+# ===========================================================================
+# 證券交易稅：賣出市值 × 0.3%
+# 券商手續費：買進／賣出市值 × 0.1425%（未計券商折讓）
+# 台股 1 張 = 1,000 股；金額採無條件捨去到元。
+TRADING_TAX_RATE = 0.003
+BROKER_FEE_RATE = 0.001425
+SHARES_PER_LOT = 1000
+
+
+def calculate_trade_costs(price, lots, side):
+    """計算單筆台股交易成本。side: buy / sell。"""
+    if price is None or lots is None or float(lots) <= 0:
+        return {"market_value": None, "fee": 0, "tax": 0, "total_cost": 0}
+    market_value = math.floor(float(price) * float(lots) * SHARES_PER_LOT)
+    fee = math.floor(market_value * BROKER_FEE_RATE)
+    tax = math.floor(market_value * TRADING_TAX_RATE) if side == "sell" else 0
+    return {
+        "market_value": market_value,
+        "fee": fee,
+        "tax": tax,
+        "total_cost": fee + tax,
+    }
+
+
+def calculate_net_position_pnl(buy_price, current_price, lots):
+    """
+    以「實際買進總成本」與「現在全部賣出後可拿回金額」計算淨損益。
+    損益率分母採原始買入總成本，與券商損益顯示邏輯一致。
+    """
+    if buy_price is None or current_price is None or lots is None or float(lots) <= 0:
+        return None
+    buy = calculate_trade_costs(buy_price, lots, "buy")
+    sell = calculate_trade_costs(current_price, lots, "sell")
+    original_cost = buy["market_value"] + buy["fee"]
+    net_proceeds = sell["market_value"] - sell["fee"] - sell["tax"]
+    pnl = net_proceeds - original_cost
+    pnl_pct = pnl / original_cost * 100 if original_cost else None
+    return {
+        "lots": float(lots),
+        "buy_market_value": buy["market_value"],
+        "buy_fee": buy["fee"],
+        "original_buy_cost": original_cost,
+        "current_market_value": sell["market_value"],
+        "sell_fee": sell["fee"],
+        "sell_tax": sell["tax"],
+        "sell_cost": sell["total_cost"],
+        "net_proceeds": net_proceeds,
+        "pnl_amount": round(pnl),
+        "pnl_pct": round(pnl_pct, 3) if pnl_pct is not None else None,
+        "gross_pnl_amount": round(sell["market_value"] - buy["market_value"]),
+    }
+
 
 def finmind_get(params, timeout=20):
     """
@@ -296,16 +350,12 @@ def fetch_revenue_yoy(stock_id):
     return result
 
 
-def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5):
+def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_lots=1):
     """
-    短線策略歷史回測（單一股票）。
-    走訪歷史每一天，套用跟即時系統完全相同的短線買進條件，
-    若觸發，記錄「訊號後 hold_days 個交易日」的報酬率，
-    最後統計勝率與平均報酬。
-
-    注意：僅回測短線策略（不含波段），因為波段策略的營收年增率
-    條件需要重建歷史上「當時」的營收數字，複雜度高很多，先略過。
-    這是歷史數據統計，不代表未來績效。
+    短線策略歷史回測。
+    除原始毛報酬外，同時計入買進手續費、賣出手續費與賣出證交稅，
+    以固定 1 張（可調整）計算每筆訊號的「淨損益／淨報酬」。
+    歷史資料只能驗證過去，不代表未來績效。
     """
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
@@ -358,20 +408,101 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5):
         if kd5_cross_up and price_above_ma5 and ma5_up and vol_ok and not_hot:
             entry_price = float(cur["Close"])
             exit_price = float(df.iloc[i + hold_days]["Close"])
-            ret = round((exit_price - entry_price) / entry_price * 100, 2)
-            signals.append({"date": cur["Date"], "entry": entry_price, "exit": exit_price, "return_pct": ret})
+            gross_return_pct = (exit_price - entry_price) / entry_price * 100
+            buy_cost = calculate_trade_costs(entry_price, backtest_lots, "buy")
+            sell_cost = calculate_trade_costs(exit_price, backtest_lots, "sell")
+            original_cost = buy_cost["market_value"] + buy_cost["fee"]
+            net_proceeds = sell_cost["market_value"] - sell_cost["fee"] - sell_cost["tax"]
+            net_pnl = net_proceeds - original_cost
+            net_return_pct = net_pnl / original_cost * 100 if original_cost else 0
+            signals.append({
+                "date": cur["Date"],
+                "exit_date": df.iloc[i + hold_days]["Date"],
+                "entry": entry_price,
+                "exit": exit_price,
+                "gross_return_pct": round(gross_return_pct, 3),
+                "net_return_pct": round(net_return_pct, 3),
+                "net_pnl": round(net_pnl),
+                "buy_fee": buy_cost["fee"],
+                "sell_fee": sell_cost["fee"],
+                "sell_tax": sell_cost["tax"],
+                "total_cost": buy_cost["fee"] + sell_cost["fee"] + sell_cost["tax"],
+            })
 
     if not signals:
-        return {"stock_id": stock_id, "signal_count": 0, "win_rate": None, "avg_return": None, "signals": []}
+        return {"stock_id": stock_id, "signal_count": 0, "win_rate": None,
+                "avg_return": None, "net_avg_return": None, "signals": []}
 
-    wins = sum(1 for s in signals if s["return_pct"] > 0)
+    wins_gross = sum(1 for s in signals if s["gross_return_pct"] > 0)
+    wins_net = sum(1 for s in signals if s["net_return_pct"] > 0)
+    net_values = [s["net_return_pct"] for s in signals]
+    gross_values = [s["gross_return_pct"] for s in signals]
     return {
         "stock_id": stock_id,
         "signal_count": len(signals),
-        "win_rate": round(wins / len(signals) * 100, 1),
-        "avg_return": round(sum(s["return_pct"] for s in signals) / len(signals), 2),
-        "signals": signals[-5:],  # 只回傳最近5筆訊號明細，避免回應過大
+        "win_rate": round(wins_net / len(signals) * 100, 1),
+        "gross_win_rate": round(wins_gross / len(signals) * 100, 1),
+        "avg_return": round(sum(gross_values) / len(gross_values), 3),
+        "net_avg_return": round(sum(net_values) / len(net_values), 3),
+        "total_net_pnl": round(sum(s["net_pnl"] for s in signals)),
+        "total_trading_cost": round(sum(s["total_cost"] for s in signals)),
+        "total_buy_fee": round(sum(s["buy_fee"] for s in signals)),
+        "total_sell_fee": round(sum(s["sell_fee"] for s in signals)),
+        "total_sell_tax": round(sum(s["sell_tax"] for s in signals)),
+        "signals": signals[-5:],
+        "all_net_returns": net_values,
     }
+
+
+def calculate_strategy_performance(results):
+    """
+    將各股票訊號合併成「整體策略績效」。
+    每筆訊號以等權方式統計；另提供訊號序列的近似複利與最大回撤。
+    注意：不同股票訊號可能重疊，因此複利曲線不是資金逐筆真實撮合結果。
+    """
+    valid = [r for r in results if r.get("signal_count", 0) > 0 and not r.get("error")]
+    all_returns = [x for r in valid for x in r.get("all_net_returns", [])]
+    all_gross = [x for r in valid for x in [s.get("gross_return_pct", 0) for s in r.get("signals", [])]]
+    # signals 欄位只保留最近5筆，因此總體成本／損益以各股票累計欄位為準。
+    total_signals = sum(r.get("signal_count", 0) for r in valid)
+    total_net_pnl = sum(r.get("total_net_pnl", 0) for r in valid)
+    total_cost = sum(r.get("total_trading_cost", 0) for r in valid)
+    total_buy_fee = sum(r.get("total_buy_fee", 0) for r in valid)
+    total_sell_fee = sum(r.get("total_sell_fee", 0) for r in valid)
+    total_sell_tax = sum(r.get("total_sell_tax", 0) for r in valid)
+    if not all_returns:
+        return {"total_signals": 0, "net_win_rate": None, "avg_net_return": None}
+
+    wins = sum(1 for x in all_returns if x > 0)
+    avg_net = sum(all_returns) / len(all_returns)
+    # 等權訊號的近似複利曲線；只作策略強弱比較，不作實際資金回測。
+    equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    for ret in all_returns:
+        equity *= (1 + ret / 100)
+        peak = max(peak, equity)
+        dd = (equity - peak) / peak * 100
+        max_dd = min(max_dd, dd)
+    gross_profit = sum(x for x in all_returns if x > 0)
+    gross_loss = abs(sum(x for x in all_returns if x < 0))
+    profit_factor = gross_profit / gross_loss if gross_loss else None
+    return {
+        "total_signals": total_signals,
+        "stock_count": len(valid),
+        "net_win_rate": round(wins / len(all_returns) * 100, 1),
+        "avg_net_return": round(avg_net, 3),
+        "approx_compound_return": round((equity - 1) * 100, 2),
+        "max_drawdown": round(max_dd, 2),
+        "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
+        "total_net_pnl": round(total_net_pnl),
+        "total_trading_cost": round(total_cost),
+        "total_buy_fee": round(total_buy_fee),
+        "total_sell_fee": round(total_sell_fee),
+        "total_sell_tax": round(total_sell_tax),
+        "fee_tax_rate": {"broker_fee": BROKER_FEE_RATE, "sell_tax": TRADING_TAX_RATE},
+    }
+
 
 
 def fetch_valuation(stock_id, current_price):
@@ -486,8 +617,10 @@ def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
     if buy_price is None or buy_price <= 0:
         return None
 
-    profit_pct = round((close - buy_price) / buy_price * 100, 2) if close is not None else None
-    profit_amount = round((close - buy_price) * shares * 1000, 0) if (close is not None and shares) else None
+    gross_profit_pct = round((close - buy_price) / buy_price * 100, 2) if close is not None else None
+    net_costs = calculate_net_position_pnl(buy_price, close, shares) if close is not None and shares else None
+    profit_pct = net_costs["pnl_pct"] if net_costs else gross_profit_pct
+    profit_amount = net_costs["pnl_amount"] if net_costs else None
 
     plan = build_entry_price_plan(
         buy_price, atr14, support, resistance, previous_low20, previous_high20, strategy_pref
@@ -536,6 +669,8 @@ def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
     return {
         "profit_pct": profit_pct,
         "profit_amount": profit_amount,
+        "gross_profit_pct": gross_profit_pct,
+        "transaction_costs": net_costs,
         "status": status,
         "status_label": status_label,
         "add_action": (
@@ -1808,26 +1943,18 @@ def get_backtest():
             r = {"stock_id": sid, "error": str(e)}
         results.append(r)
 
-    valid = [r for r in results if r.get("signal_count", 0) > 0]
-    total_signals = sum(r["signal_count"] for r in valid)
-    overall_win_rate = None
-    overall_avg_return = None
-    if total_signals > 0:
-        total_wins = sum(r["win_rate"] / 100 * r["signal_count"] for r in valid)
-        overall_win_rate = round(total_wins / total_signals * 100, 1)
-        overall_avg_return = round(
-            sum(r["avg_return"] * r["signal_count"] for r in valid) / total_signals, 2
-        )
-
+    overall = calculate_strategy_performance(results)
     result = {
         "period_days": lookback_days,
         "hold_days": hold_days,
-        "stocks": results,
-        "overall": {
-            "total_signals": total_signals,
-            "win_rate": overall_win_rate,
-            "avg_return": overall_avg_return,
+        "backtest_lots": 1,
+        "cost_rules": {
+            "broker_fee_rate": BROKER_FEE_RATE,
+            "sell_tax_rate": TRADING_TAX_RATE,
+            "fee_note": "買進／賣出皆計手續費；僅賣出計證交稅；未計券商折讓",
         },
+        "stocks": results,
+        "overall": overall,
     }
 
     _backtest_cache[cache_key] = (now_ts, result)
