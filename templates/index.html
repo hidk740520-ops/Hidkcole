@@ -149,6 +149,15 @@ tr:last-child td{border-bottom:none}
 
 <!-- ===================== MAIN ===================== -->
 <div class="container">
+
+  <!-- ===== 🎯 交易決策中心（V2.1）===== -->
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-title"><span class="icon">🎯</span>交易決策中心</div>
+    <div class="card-body" id="decisionBody">
+      <div class="placeholder">輸入股票代號開始健診</div>
+    </div>
+  </div>
+
 <div class="grid">
 
   <!-- ===== 策略燈號 ===== -->
@@ -346,7 +355,7 @@ function doSearch() {
   };
 
   // 顯示 loading
-  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody'];
+  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody','decisionBody'];
   bodies.forEach(function(id){
     document.getElementById(id).innerHTML = loadingHtml('載入中...');
   });
@@ -469,6 +478,9 @@ function fetchTechData() {
         score: j.score,
         scoreMax: j.score_max,
         strategy: j.strategy || null,
+        decision: j.decision || null,
+        weeklyKd: j.weekly_kd || null,
+        revenueYoy: j.revenue_yoy,
         valuation: j.valuation || null,
         position: j.position || null
       };
@@ -546,6 +558,7 @@ function fetchNews() {
 // 渲染：全部
 // ===========================================================================
 function renderAll() {
+  renderDecision();
   renderStrategy();
   renderValuation();
   renderPosition();
@@ -560,6 +573,92 @@ function renderAll() {
 }
 
 // --- 策略燈號（短線3~5天 / 波段2~3週）---
+// --- 🎯 交易決策中心（V2.1 價格決策引擎）---
+function renderDecision() {
+  var el = document.getElementById('decisionBody');
+  var dec = G.techData && G.techData.decision;
+  if (!G.techData) { el.innerHTML = '<div class="placeholder">輸入股票代號開始健診</div>'; return; }
+  if (!dec) { el.innerHTML = errHtml('價格決策引擎資料不足，無法計算'); return; }
+
+  var colorMap = {
+    BUY: 'var(--red)', ADD: 'var(--blue)', HOLD: 'var(--red)',
+    WAIT: 'var(--yellow)', REDUCE: 'var(--orange)',
+    STOP: 'var(--green)', NO_TRADE: 'var(--green)'
+  };
+  // 若有輸入買入價，以「持股價格分析」算出的最終裁決（已考慮個人成本+風險優先權）為準
+  var pos = G.techData.position;
+  var finalAction = (pos && pos.final_action) ? pos.final_action : dec.action;
+  var finalLabel = (pos && pos.final_label) ? pos.final_label : dec.label;
+  var color = colorMap[finalAction] || 'var(--text-dim)';
+
+  var html = '<div style="text-align:center;font-size:1.4rem;font-weight:700;color:' + color + ';margin-bottom:4px">' + finalLabel + '</div>';
+  html += '<div style="text-align:center;font-size:.85rem;color:var(--text-dim);margin-bottom:12px">買入評分 ' + dec.score + '/100　｜　信心度 ' + dec.confidence.score + '/100（' + dec.confidence.level + '）</div>';
+
+  if (dec.volume_analysis) {
+    var va = dec.volume_analysis;
+    html += '<table style="margin-bottom:10px">';
+    html += '<tr><th>20日量比</th><td class="mono">' + fmt(va.volume_ratio_20) + ' 倍</td></tr>';
+    html += '<tr><th>量價狀態</th><td>' + (va.status || '資料不足') + '</td></tr>';
+    html += '<tr><th>量價效率</th><td class="mono">' + fmt(va.efficiency,3) + '</td></tr>';
+    html += '</table>';
+  }
+
+  var pd = dec.price_decision;
+
+  if (pd.buy) {
+    html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">🎯 核心買點（價格精度 ' + pd.buy.precision + '級 ±' + fmt(pd.buy.tolerance_pct,1) + '%）</div>';
+    html += '<table style="margin-bottom:10px">';
+    html += '<tr><th>核心買點</th><td class="mono pos">' + fmt(pd.buy.core) + '</td></tr>';
+    html += '<tr><th>最佳執行區</th><td class="mono">' + fmt(pd.buy.zone_low) + ' ～ ' + fmt(pd.buy.zone_high) + '</td></tr>';
+    html += '</table>';
+  }
+
+  if (pd.add && pd.add.type) {
+    var addTypeLabel = { PULLBACK: '🔵 回踩補倉', BREAKOUT: '🔵 突破補倉', TREND: '🔵 趨勢加碼', BLOCKED: '🔴 禁止補倉' }[pd.add.type] || pd.add.type;
+    html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">' + addTypeLabel + '</div>';
+    if (pd.add.type !== 'BLOCKED') {
+      html += '<table style="margin-bottom:10px">';
+      html += '<tr><th>補倉核心價</th><td class="mono pos">' + fmt(pd.add.core) + '</td></tr>';
+      html += '<tr><th>執行區</th><td class="mono">' + fmt(pd.add.low) + ' ～ ' + fmt(pd.add.high) + '</td></tr>';
+      html += '</table>';
+      if (pd.add.note) html += '<div style="color:var(--yellow);font-size:.85rem;margin-bottom:10px">' + pd.add.note + '</div>';
+    } else {
+      html += '<div style="color:var(--green);font-size:.9rem;margin-bottom:10px">' + (pd.add.reasons[0] || '目前不建議補倉') + '</div>';
+    }
+  }
+
+  if (pd.risk) {
+    html += '<table style="margin-bottom:10px">';
+    html += '<tr><th>停損價</th><td class="mono neg">' + fmt(pd.risk.stop) + (pd.risk.warning_triggered ? ' <span style="color:var(--orange)">⚠已接近</span>' : '') + '</td></tr>';
+    html += '</table>';
+  }
+
+  if (pd.profit) {
+    html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">🟢 停利規劃</div>';
+    html += '<table style="margin-bottom:10px">';
+    if (pd.profit.target1 != null) html += '<tr><th>第一停利</th><td class="mono pos">' + fmt(pd.profit.target1) + '（建議減碼20~30%）</td></tr>';
+    if (pd.profit.target2 != null) html += '<tr><th>第二停利</th><td class="mono pos">' + fmt(pd.profit.target2) + '（再減碼30~50%）</td></tr>';
+    if (pd.profit.trailing != null) html += '<tr><th>移動停利</th><td class="mono">' + fmt(pd.profit.trailing) + '（剩餘部位）</td></tr>';
+    html += '</table>';
+  }
+
+  if (dec.no_trade_reasons && dec.no_trade_reasons.length) {
+    html += '<div style="background:var(--card2);border-radius:8px;padding:10px;margin-bottom:8px;color:var(--green)">⛔ 禁止交易原因：' + dec.no_trade_reasons.join('；') + '</div>';
+  }
+
+  if (dec.reasons && dec.reasons.length) {
+    html += '<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--blue);font-size:.9rem">為什麼？（點開看理由）</summary>';
+    html += '<ul style="margin:8px 0 0 20px;font-size:.85rem;color:var(--text-dim)">';
+    dec.reasons.forEach(function(r){ html += '<li>✓ ' + r + '</li>'; });
+    html += '</ul></details>';
+  }
+
+  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:10px">＊ 這是依技術面規則計算的價格決策參考，±1%為執行容忍區間非預測保證，不構成投資建議</div>';
+
+  el.innerHTML = html;
+}
+
+
 function renderStrategy() {
   var el = document.getElementById('strategyBody');
   var s = G.techData && G.techData.strategy;
@@ -598,7 +697,7 @@ function renderStrategy() {
   s.mid.reasons.forEach(function(r){ html += '<li>' + r + '</li>'; });
   html += '</ul></div>';
 
-  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 訊號僅供參考，不構成投資建議；未包含市值前50大／電子半導體產業篩選</div>';
+  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 訊號僅供參考，不構成投資建議；本版本不包含股票池／產業篩選功能</div>';
 
   el.innerHTML = html;
 }
@@ -644,6 +743,32 @@ function renderPosition() {
   var color = p.status === 'STOP' ? 'var(--green)' : (p.status === 'REDUCE' ? 'var(--yellow)' : (p.status === 'ADD' ? 'var(--blue)' : 'var(--red)'));
 
   var html = '<div style="text-align:center;font-size:1.3rem;font-weight:700;color:' + color + ';margin-bottom:10px">' + p.status_label + '</div>';
+
+  // 技術指標速覽（直接放進這張卡片，不用切去別的卡片看）
+  var t = G.techData;
+  html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">🔍 技術指標速覽</div>';
+  html += '<table style="margin-bottom:8px">';
+  html += '<tr><th>日KD(9,3,3)</th><td class="mono">K=' + fmt(t.kd.k,1) + ' D=' + fmt(t.kd.d,1) +
+          ' <span class="' + (t.kd.k > t.kd.d ? 'pos' : 'neg') + '">（' + (t.kd.k > t.kd.d ? '偏多' : '偏空') + '）</span></td></tr>';
+  if (t.weeklyKd) {
+    var wUp = t.weeklyKd.K9 > t.weeklyKd.D9;
+    html += '<tr><th>週KD(9,3,3)</th><td class="mono">K=' + fmt(t.weeklyKd.K9,1) + ' D=' + fmt(t.weeklyKd.D9,1) +
+            ' <span class="' + (wUp ? 'pos' : 'neg') + '">（' + (wUp ? '偏多' : '偏空') + '）</span></td></tr>';
+  }
+  html += '<tr><th>5MA</th><td class="mono">' + fmt(t.ma5) + ' <span class="' + (t.lastClose > t.ma5 ? 'pos' : 'neg') + '">（股價' + (t.lastClose > t.ma5 ? '在上方' : '在下方') + '）</span></td></tr>';
+  if (t.ma20 != null) {
+    html += '<tr><th>20MA(月線)</th><td class="mono">' + fmt(t.ma20) + ' <span class="' + (t.lastClose > t.ma20 ? 'pos' : 'neg') + '">（股價' + (t.lastClose > t.ma20 ? '在上方' : '在下方') + '）</span></td></tr>';
+  }
+  if (t.ma60 != null) {
+    html += '<tr><th>60MA</th><td class="mono">' + fmt(t.ma60) + ' <span class="' + (t.lastClose > t.ma60 ? 'pos' : 'neg') + '">（股價' + (t.lastClose > t.ma60 ? '在上方' : '在下方') + '）</span></td></tr>';
+  }
+  html += '<tr><th>成交量</th><td class="mono">' + fmtInt(t.vol.last) + '（20日均量比 ' + fmt(t.vol.ratio,2) + ' 倍）</td></tr>';
+  if (t.revenueYoy != null) {
+    html += '<tr><th>最新營收YoY</th><td class="mono ' + (t.revenueYoy > 0 ? 'pos' : 'neg') + '">' + (t.revenueYoy > 0 ? '+' : '') + fmt(t.revenueYoy,1) + '%</td></tr>';
+  }
+  html += '</table>';
+
+  html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">📊 損益與判斷</div>';
   html += '<table style="margin-bottom:8px">';
   html += '<tr><th>買入價</th><td class="mono">' + fmt(buyPriceVal) + '</td></tr>';
   html += '<tr><th>目前價</th><td class="mono">' + fmt(G.techData.lastClose) + '</td></tr>';
@@ -660,7 +785,15 @@ function renderPosition() {
   html += '<tr><th>補倉判斷</th><td>' + p.add_action + '</td></tr>';
   html += '<tr><th>賣出判斷</th><td>' + p.sell_action + '</td></tr>';
   if (p.stop_loss != null) html += '<tr><th>參考停損價</th><td class="mono neg">' + fmt(p.stop_loss) + '</td></tr>';
-  if (p.take_profit != null) html += '<tr><th>參考停利價</th><td class="mono pos">' + fmt(p.take_profit) + '</td></tr>';
+  if (p.take_profit != null) html += '<tr><th>第一停利價</th><td class="mono pos">' + fmt(p.take_profit) + '</td></tr>';
+  if (p.price_plan) {
+    html += '<tr><th>第一補倉區</th><td class="mono">' + fmt(p.price_plan.add1.low) + ' ～ ' + fmt(p.price_plan.add1.high) + '</td></tr>';
+    html += '<tr><th>第二補倉區</th><td class="mono">' + fmt(p.price_plan.add2.low) + ' ～ ' + fmt(p.price_plan.add2.high) + '</td></tr>';
+    html += '<tr><th>第二停利價</th><td class="mono pos">' + fmt(p.price_plan.target2) + '</td></tr>';
+    if (p.risk_reward && p.risk_reward.target1) html += '<tr><th>風險報酬比①</th><td class="mono">1 : ' + fmt(p.risk_reward.target1.ratio,2) + '</td></tr>';
+    if (p.risk_reward && p.risk_reward.target2) html += '<tr><th>風險報酬比②</th><td class="mono">1 : ' + fmt(p.risk_reward.target2.ratio,2) + '</td></tr>';
+  }
+  if (p.execution) html += '<tr><th>補倉執行狀態</th><td>' + p.execution.note + '</td></tr>';
   html += '</table>';
   html += '<div style="background:var(--card2);border-radius:8px;padding:10px;font-size:.9rem">💡 ' + p.recommendation + '</div>';
   html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 此分析僅依當下輸入即時計算，不會儲存，重新整理後需重新輸入</div>';
