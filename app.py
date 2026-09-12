@@ -195,6 +195,15 @@ def calculate_indicators(df):
     df["Vol_MA5"] = df["Volume"].rolling(window=5).mean()
     df["Vol_MA20"] = df["Volume"].rolling(window=20).mean()
 
+    # === 6. ATR14（真實波動幅度）— V2.1 動態停損／價格容忍度核心 ===
+    prev_close_shift = df["Close"].shift(1)
+    tr = pd.concat([
+        df["High"] - df["Low"],
+        (df["High"] - prev_close_shift).abs(),
+        (df["Low"] - prev_close_shift).abs(),
+    ], axis=1).max(axis=1)
+    df["ATR14"] = tr.rolling(window=14).mean()
+
     return df
 
 
@@ -464,72 +473,89 @@ def fetch_valuation(stock_id, current_price):
 
 
 def analyze_position(buy_price, shares, strategy_pref, close, ma5, ma20, ma60,
-                      recent_high5, volume, vol_ma5, short_sig, mid_sig, valuation):
+                      recent_high5, volume, vol_ma5, short_sig, mid_sig, valuation,
+                      atr14=None, support=None, resistance=None,
+                      previous_low20=None, previous_high20=None,
+                      volume_analysis=None, trend_score=50, no_trade_reasons=None,
+                      kd_cross=None):
     """
-    持股價格即時分析（無需存檔，每次輸入當下計算）。
-    依使用者輸入的買入價／張數／策略（short 或 mid），
-    結合既有的短線／波段策略訊號與估值資料，給出：
-    HOLD（持有）／ADD（可補倉）／REDUCE（停利／減碼）／STOP（建議停損）
+    V2.1 持股價格即時分析。
+    核心：輸入買入價後，建立「第一補倉／第二補倉／停損／第一停利／第二停利」
+    價格階梯，再用量價、趨勢、KD、禁止交易條件決定是否允許執行。
     """
-    profit_pct = round((close - buy_price) / buy_price * 100, 2) if buy_price else None
-    profit_amount = None
-    if buy_price and shares:
-        # 張數 × 1000 = 股數；零股可填小數，例如 100股 = 0.1張
-        profit_amount = round((close - buy_price) * shares * 1000, 0)
-    sig = short_sig if strategy_pref == "short" else mid_sig
-    action = sig["action"]
+    if buy_price is None or buy_price <= 0:
+        return None
+
+    profit_pct = round((close - buy_price) / buy_price * 100, 2) if close is not None else None
+    profit_amount = round((close - buy_price) * shares * 1000, 0) if (close is not None and shares) else None
+
+    plan = build_entry_price_plan(
+        buy_price, atr14, support, resistance, previous_low20, previous_high20, strategy_pref
+    )
+    execution = evaluate_entry_price_plan(
+        plan, close, volume_analysis or {}, trend_score, kd_cross, no_trade_reasons
+    ) if plan else None
 
     status = "HOLD"
     status_label = "🟢 持有"
-    add_action = "暫不補倉"
-    sell_action = "尚未觸發"
     reasons = []
 
-    stop_ref = ma5 if strategy_pref == "short" else ma20
-    stop_loss = round(stop_ref, 2) if stop_ref is not None else None
-    take_profit = None
-    if valuation and not valuation.get("_error"):
-        take_profit = valuation["target_price"]
-    elif recent_high5 is not None:
-        take_profit = round(recent_high5 * 1.05, 2)
+    if no_trade_reasons:
+        status = "STOP" if close is not None and plan and close <= plan["stop"] else "HOLD"
+        status_label = "🔴 建議停損" if status == "STOP" else "⛔ 暫停補倉"
+        reasons.extend(no_trade_reasons)
 
-    if "停損" in action:
+    if plan and close is not None and close <= plan["stop"]:
         status = "STOP"
         status_label = "🔴 建議停損"
-        sell_action = "已觸發停損條件"
-        reasons.append(sig["reasons"][0] if sig["reasons"] else "已跌破防守價位")
-    elif "結清" in action or "了結" in action:
-        status = "REDUCE"
-        status_label = "🟡 停利／減碼"
-        sell_action = "已達停利／過熱條件，建議分批減碼"
-        reasons.extend(sig["reasons"])
-    else:
-        # 判斷是否符合補倉條件（賺錢狀態 + 突破近期高點 + 量能配合）
-        breakout = (
-            close is not None and recent_high5 is not None and close > recent_high5
-            and volume is not None and vol_ma5 and volume > vol_ma5
-        )
-        profitable = profit_pct is not None and profit_pct > 0
-        if action == "買進訊號" and profitable and breakout:
-            status = "ADD"
-            status_label = "🔵 可以考慮補倉"
-            add_action = f"建議補倉區間：{round(close*0.99,1)}～{round(close*1.01,1)}"
-            reasons.append("趨勢偏多、獲利中且突破近期高點並帶量")
-        else:
-            reasons.append("目前尚未突破關鍵壓力，不建議追價加碼" if not breakout else "訊號尚未同時滿足補倉條件")
+        reasons.append("目前價格已跌破 V2.1 動態防守價")
 
-    recommendation = status_label.split(" ", 1)[-1] + "：" + ("；".join(reasons) if reasons else "持續觀察")
+    elif execution and execution["status"] in ("ADD1_READY", "ADD2_READY"):
+        status = "ADD"
+        status_label = "🔵 可評估補倉"
+        reasons.append(execution["note"])
+
+    else:
+        # 接近第一／第二停利時，優先提示減碼，但不覆蓋停損。
+        if plan and close is not None and close >= plan["target2"]:
+            status = "REDUCE"
+            status_label = "🟡 第二停利／減碼"
+            reasons.append("價格已進入第二停利區，建議分批落袋並保留移動停利。")
+        elif plan and close is not None and close >= plan["target1"]:
+            status = "REDUCE"
+            status_label = "🟡 第一停利／減碼"
+            reasons.append("價格已進入第一停利區，建議部分減碼。")
+        else:
+            reasons.append(
+                execution["note"] if execution else "持續觀察價格與量價條件。"
+            )
+
+    rr1 = plan.get("risk_reward_1") if plan else None
+    rr2 = plan.get("risk_reward_2") if plan else None
 
     return {
         "profit_pct": profit_pct,
         "profit_amount": profit_amount,
         "status": status,
         "status_label": status_label,
-        "add_action": add_action,
-        "sell_action": sell_action,
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "recommendation": recommendation,
+        "add_action": (
+            f"第一補倉：{plan['add1']['low']}～{plan['add1']['high']}；"
+            f"第二補倉：{plan['add2']['low']}～{plan['add2']['high']}"
+            if plan else "資料不足"
+        ),
+        "sell_action": (
+            f"第一停利：{plan['target1']}；第二停利：{plan['target2']}"
+            if plan else "資料不足"
+        ),
+        "stop_loss": plan["stop"] if plan else None,
+        "take_profit": plan["target1"] if plan else None,
+        "price_plan": plan,
+        "execution": execution,
+        "risk_reward": {
+            "target1": rr1,
+            "target2": rr2,
+        },
+        "recommendation": status_label + "：" + ("；".join(reasons) if reasons else "持續觀察"),
     }
 
 
@@ -687,6 +713,553 @@ def build_strategy_signals(latest, prev, weekly_kd, revenue_yoy, vol_ma20, day_o
 
 
 # ===========================================================================
+# V2.1 價格決策引擎（依規格收斂為 7 大模組，全部集中在本檔案，不拆 engine/）
+# ===========================================================================
+
+def _weighted_cluster(candidates):
+    """
+    候選價格聚集：candidates = [(name, value, weight), ...]（value 為 None 的自動剔除，
+    剩餘權重自動正規化，符合規格「無效價格不能參與計算」）。
+    回傳 (core_price, precision, tolerance_pct, component_list) 或 None（無有效候選時）。
+    """
+    valid = [(n, v, w) for n, v, w in candidates if v is not None]
+    if not valid:
+        return None
+    total_w = sum(w for _, _, w in valid)
+    if total_w <= 0:
+        return None
+    core = sum(v * w for _, v, w in valid) / total_w
+
+    values = [v for _, v, _ in valid]
+    mean_v = sum(values) / len(values)
+    if len(values) > 1 and mean_v:
+        variance = sum((v - mean_v) ** 2 for v in values) / len(values)
+        disp_pct = (variance ** 0.5) / mean_v * 100
+    else:
+        disp_pct = 0.0
+
+    if disp_pct < 1.0 and len(valid) >= 4:
+        precision, tol = "A", 0.01
+    elif disp_pct < 2.5 and len(valid) >= 2:
+        precision, tol = "B", 0.015
+    else:
+        precision, tol = "C", 0.03
+
+    components = [{"name": n, "value": round(v, 2)} for n, v, _ in valid]
+    return round(core, 2), precision, tol, components
+
+
+def calculate_support_cluster(close, ma20, bb_lower, previous_low5, previous_low20, atr14):
+    """核心買點：支撐價格聚集（MA20 25% / BB下軌 15% / 前5日低 20% / 前20日低 15% / ATR支撐 15% + 量價成本10%省略，權重正規化補上）"""
+    atr_support = (close - atr14 * 0.8) if (close is not None and atr14 is not None) else None
+    candidates = [
+        ("MA20", ma20, 0.25),
+        ("布林下軌", bb_lower, 0.15),
+        ("前5日低點", previous_low5, 0.20),
+        ("前20日低點", previous_low20, 0.15),
+        ("ATR支撐", atr_support, 0.15),
+    ]
+    result = _weighted_cluster(candidates)
+    if not result:
+        return None
+    core, precision, tol, components = result
+    return {
+        "core": core,
+        "zone_low": round(core * (1 - tol), 2),
+        "zone_high": round(core * (1 + tol), 2),
+        "precision": precision,
+        "tolerance_pct": round(tol * 100, 2),
+        "components": components,
+    }
+
+
+def calculate_resistance_cluster(close, ma20, bb_upper, previous_high5, previous_high20, atr14):
+    """核心賣點／壓力：與支撐聚集同邏輯，換成壓力側候選價格"""
+    atr_resistance = (close + atr14 * 0.8) if (close is not None and atr14 is not None) else None
+    candidates = [
+        ("MA20", ma20, 0.20),
+        ("布林上軌", bb_upper, 0.20),
+        ("前5日高點", previous_high5, 0.25),
+        ("前20日高點", previous_high20, 0.20),
+        ("ATR壓力", atr_resistance, 0.15),
+    ]
+    result = _weighted_cluster(candidates)
+    if not result:
+        return None
+    core, precision, tol, components = result
+    return {
+        "core": core,
+        "zone_low": round(core * (1 - tol), 2),
+        "zone_high": round(core * (1 + tol), 2),
+        "precision": precision,
+        "tolerance_pct": round(tol * 100, 2),
+        "components": components,
+    }
+
+
+def check_no_trade(ma20, ma20_prev, ma60, close, volume, vol_ma20, macd_hist, macd_hist_prev):
+    """
+    禁止交易高優先權判斷。任一成立即 NO_TRADE，即使分數再高也不能買。
+    回傳 reasons list；空list代表沒有觸發禁止條件。
+    """
+    reasons = []
+    if ma20 is not None and ma60 is not None and ma20_prev is not None:
+        if ma20 < ma60 and ma20 < ma20_prev:
+            reasons.append("趨勢空頭：MA20 < MA60 且 MA20 向下")
+    if ma20 is not None and close is not None and vol_ma20 and volume is not None:
+        if close < ma20 and volume > vol_ma20 * 1.3:
+            reasons.append("放量跌破月線支撐")
+    if macd_hist is not None and macd_hist_prev is not None:
+        if macd_hist < macd_hist_prev and macd_hist < 0 and macd_hist_prev < 0:
+            reasons.append("MACD 空頭擴張")
+    return reasons
+
+
+def calculate_buy_score(ma20, ma60, close, ma5, kd_cross, k, macd_improving,
+                         pullback_support, vol_ok, inst_bullish, fund_ok):
+    """買入訊號分數制，0~100。回傳 (score, reasons)"""
+    score = 0
+    reasons = []
+    if ma20 is not None and ma60 is not None and ma20 > ma60:
+        score += 15; reasons.append("MA20>MA60（多頭排列）")
+    if ma20 is not None and close is not None and close > ma20:
+        score += 10; reasons.append("站上月線(20MA)")
+    if ma5 is not None and ma20 is not None and ma5 > ma20:
+        score += 10; reasons.append("5MA>20MA")
+    if kd_cross == "黃金交叉":
+        score += 10; reasons.append("KD黃金交叉")
+    if k is not None and k < 80:
+        score += 5
+    if macd_improving:
+        score += 10; reasons.append("MACD轉強")
+    if pullback_support:
+        score += 15; reasons.append("股價回踩支撐")
+    if vol_ok:
+        score += 10; reasons.append("量能正常")
+    if inst_bullish:
+        score += 10; reasons.append("法人偏多")
+    if fund_ok:
+        score += 5; reasons.append("基本面合理")
+    return score, reasons
+
+
+def calculate_add_engine(close, ma20, ma20_prev, previous_high5, volume, vol_ma20,
+                          ma5, macd_hist, macd_hist_prev, kd_dead_cross,
+                          profit_pct, previous_high20, support_cluster):
+    """
+    補倉引擎：回踩補倉／突破補倉／趨勢加碼／禁止補倉，四選一（或都不符合）。
+    """
+    result = {"type": None, "core": None, "low": None, "high": None, "note": None, "reasons": []}
+
+    # 禁止補倉：最高優先權
+    if close is not None and ma20 is not None and vol_ma20 and volume is not None:
+        if close < ma20 and volume > vol_ma20 * 1.3:
+            result["type"] = "BLOCKED"
+            result["reasons"].append("跌破月線且放量，禁止補倉")
+            return result
+    if ma20 is not None and ma20_prev is not None and macd_hist is not None and macd_hist_prev is not None:
+        if ma20 < ma20_prev and macd_hist < macd_hist_prev and macd_hist < 0:
+            result["type"] = "BLOCKED"
+            result["reasons"].append("月線走弱且MACD空頭擴張，禁止補倉")
+            return result
+
+    # 回踩補倉：貼近月線、月線仍向上、沒有爆量殺跌、KD沒死叉
+    if (close is not None and ma20 is not None and ma20 != 0 and ma20_prev is not None
+            and not kd_dead_cross):
+        dist_pct = abs(close - ma20) / ma20 * 100
+        vol_not_crash = not (vol_ma20 and volume is not None and volume > vol_ma20 * 1.3 and close < ma20)
+        if dist_pct <= 1.0 and ma20 >= ma20_prev and vol_not_crash:
+            core = support_cluster["core"] if support_cluster else ma20
+            result["type"] = "PULLBACK"
+            result["core"] = core
+            result["low"] = round(core * 0.99, 2)
+            result["high"] = round(core * 1.01, 2)
+            result["reasons"] = ["股價貼近月線（20MA）", "月線仍向上", "沒有爆量殺跌", "KD沒有死亡交叉"]
+            return result
+
+    # 突破補倉：站上前5日高點 + 爆量 + 短均在長均之上 + MACD非空頭擴張
+    if (close is not None and previous_high5 is not None and vol_ma20 and volume is not None
+            and ma5 is not None and ma20 is not None):
+        macd_ok = not (macd_hist is not None and macd_hist_prev is not None
+                        and macd_hist < macd_hist_prev and macd_hist < 0)
+        if close > previous_high5 and volume > vol_ma20 * 1.3 and ma5 > ma20 and macd_ok:
+            result["type"] = "BREAKOUT"
+            result["core"] = round(previous_high5, 2)
+            result["low"] = round(previous_high5 * 0.99, 2)
+            result["high"] = round(previous_high5 * 1.01, 2)
+            result["reasons"] = ["突破前5日高點", "成交量 > 20日均量的1.3倍", "5MA>20MA", "MACD非空頭擴張"]
+            # 已經明顯偏離突破價，提醒不要追價
+            if close > previous_high5 * 1.03:
+                result["note"] = "⚠️ 目前股價已偏離突破補倉區，不建議追價"
+            return result
+
+    # 趨勢加碼：持倉獲利 + 突破20日高點 + 量能確認 + 5MA>20MA
+    if (profit_pct is not None and profit_pct > 3 and close is not None
+            and previous_high20 is not None and vol_ma20 and volume is not None
+            and ma5 is not None and ma20 is not None):
+        if close > previous_high20 and volume > vol_ma20 * 1.2 and ma5 > ma20:
+            result["type"] = "TREND"
+            result["core"] = round(close, 2)
+            result["low"] = round(close * 0.99, 2)
+            result["high"] = round(close * 1.01, 2)
+            result["reasons"] = ["持倉獲利中", "突破20日高點", "量能確認", "5MA>20MA（趨勢仍向上）"]
+            return result
+
+    return result
+
+
+def calculate_risk_engine(base_price, atr14, ma20, previous_low_ref, strategy_pref, close):
+    """
+    動態停損：候選價格取「策略對應的合理防守價」，短線較緊、波段較寬。
+    base_price：成本價（有輸入買入價時）或現價（純即時判斷時）。
+    """
+    if atr14 is None or base_price is None:
+        return None
+    atr_mult = 1.2 if strategy_pref == "short" else 1.8
+    s1 = base_price - atr14 * atr_mult
+    candidates = [s1]
+    if ma20 is not None:
+        candidates.append(ma20 - atr14 * 0.3)
+    if previous_low_ref is not None:
+        candidates.append(previous_low_ref - atr14 * 0.2)
+    stop_price = round(max(candidates), 2)  # 取較保守（較高）的防守價，risk-first
+    warning_price = round(stop_price * 1.01, 2)
+    warning_triggered = close is not None and close <= warning_price
+    return {
+        "stop": stop_price,
+        "warning": warning_price,
+        "warning_triggered": bool(warning_triggered),
+        "hit": (close is not None and close <= stop_price),
+    }
+
+
+def calculate_profit_engine(base_price, previous_high20, atr14, valuation, bb_upper, ma5, close_max_since_entry):
+    """三級停利：第一停利／第二停利／移動停利"""
+    candidates_t1 = []
+    if previous_high20 is not None:
+        candidates_t1.append(previous_high20)
+    if bb_upper is not None:
+        candidates_t1.append(bb_upper)
+    target1 = round(min(candidates_t1), 2) if candidates_t1 else None
+
+    candidates_t2 = []
+    if previous_high20 is not None and atr14 is not None:
+        candidates_t2.append(previous_high20 + atr14)
+    if valuation and not valuation.get("_error") and valuation.get("target_price"):
+        candidates_t2.append(valuation["target_price"])
+    target2 = round(max(candidates_t2), 2) if candidates_t2 else None
+    if target1 is not None and target2 is not None and target2 < target1:
+        target2 = round(target1 * 1.05, 2)  # 確保第二停利 >= 第一停利
+
+    trailing = None
+    if close_max_since_entry is not None:
+        trail_pct = round(close_max_since_entry * 0.97, 2)
+        trailing = max(trail_pct, ma5) if ma5 is not None else trail_pct
+        trailing = round(trailing, 2)
+
+    return {"target1": target1, "target2": target2, "trailing": trailing}
+
+
+
+def calculate_volume_metrics(current_volume, avg_volume_20, price_change_pct):
+    """V2.1 統一量比與量價效率。主量比固定以20日均量為基準。"""
+    if current_volume is None or avg_volume_20 is None or avg_volume_20 <= 0:
+        return {
+            "volume_ratio_20": None,
+            "price_change_pct": price_change_pct,
+            "efficiency": None,
+            "status": "資料不足",
+            "score": 50,
+        }
+
+    ratio = current_volume / avg_volume_20
+    pct = float(price_change_pct or 0.0)
+
+    # 效率：每 1 倍量比所換來的價格變化；只作相對評分，不視為預測報酬。
+    efficiency = pct / ratio if ratio > 0 else 0.0
+
+    if ratio >= 1.5 and pct >= 2.0:
+        status, score = "放量上攻", 90
+    elif ratio >= 1.2 and pct > 0.5:
+        status, score = "量價偏多", 80
+    elif ratio >= 1.5 and pct <= -1.0:
+        status, score = "放量下跌", 25
+    elif ratio >= 1.5 and abs(pct) < 0.5:
+        status, score = "大量不漲", 40
+    elif ratio < 0.7:
+        status, score = "量能偏弱", 50
+    else:
+        status, score = "量價正常", 65
+
+    return {
+        "volume_ratio_20": round(ratio, 2),
+        "price_change_pct": round(pct, 2),
+        "efficiency": round(efficiency, 3),
+        "status": status,
+        "score": score,
+    }
+
+
+def calculate_risk_reward(entry_price, stop_price, target_price):
+    """V2.1 風險報酬比。回傳 None 表示資料不足或報酬不為正。"""
+    if entry_price is None or stop_price is None or target_price is None:
+        return None
+    risk = entry_price - stop_price
+    reward = target_price - entry_price
+    if risk <= 0 or reward <= 0:
+        return None
+    return {
+        "risk": round(risk, 2),
+        "reward": round(reward, 2),
+        "ratio": round(reward / risk, 2),
+        "label": f"1 : {round(reward / risk, 2)}",
+    }
+
+
+def build_entry_price_plan(entry_price, atr14, support, resistance, previous_low20,
+                           previous_high20, strategy_pref="short"):
+    """
+    V2.1：使用者輸入買入價後建立價格階梯。
+    補倉不是「跌到就買」，而是先產生候選價格，再由條件引擎決定是否允許執行。
+    """
+    if entry_price is None or entry_price <= 0:
+        return None
+
+    support_core = support.get("core") if support else None
+    resistance_core = resistance.get("core") if resistance else None
+
+    # 優先以 ATR + 支撐建立兩級補倉；避免固定百分比硬套所有股票。
+    atr = float(atr14) if atr14 is not None and atr14 > 0 else entry_price * 0.03
+    first_ref = support_core if support_core is not None else entry_price - atr * 0.8
+    second_ref = previous_low20 if previous_low20 is not None else entry_price - atr * 1.6
+
+    # 若支撐高於成本太多，第一補倉仍以成本下方的合理回撤為主。
+    first_core = min(first_ref, entry_price - atr * 0.35)
+    second_core = min(second_ref, first_core - atr * 0.5)
+
+    zone_width = max(atr * 0.18, entry_price * 0.005)
+    first_low = round(max(0.01, first_core - zone_width), 2)
+    first_high = round(max(first_low, first_core + zone_width), 2)
+
+    second_low = round(max(0.01, second_core - zone_width), 2)
+    second_high = round(max(second_low, second_core + zone_width), 2)
+
+    # 防守：支撐下方 + ATR；若結果高於第一補倉區，仍保留風險底線。
+    support_stop = (support_core - atr * 0.35) if support_core is not None else None
+    atr_stop = entry_price - atr * (1.2 if strategy_pref == "short" else 1.8)
+    candidates = [x for x in (support_stop, atr_stop) if x is not None and x > 0]
+    stop = round(max(candidates), 2) if candidates else round(entry_price * 0.95, 2)
+
+    # 停利以壓力與20日高點為主，不用估值價直接覆蓋技術壓力。
+    target1_candidates = [x for x in (resistance_core, previous_high20) if x is not None and x > entry_price]
+    target1 = round(min(target1_candidates), 2) if target1_candidates else round(entry_price + atr * 1.5, 2)
+    target2_candidates = [x for x in (previous_high20 + atr if previous_high20 else None,
+                                      resistance_core + atr if resistance_core else None)]
+    target2_candidates = [x for x in target2_candidates if x is not None and x > target1]
+    target2 = round(max(target2_candidates), 2) if target2_candidates else round(max(target1 + atr, entry_price + atr * 2.5), 2)
+
+    return {
+        "entry": round(entry_price, 2),
+        "add1": {"core": round(first_core, 2), "low": first_low, "high": first_high},
+        "add2": {"core": round(second_core, 2), "low": second_low, "high": second_high},
+        "stop": stop,
+        "target1": target1,
+        "target2": target2,
+        "risk_reward_1": calculate_risk_reward(entry_price, stop, target1),
+        "risk_reward_2": calculate_risk_reward(entry_price, stop, target2),
+    }
+
+
+def evaluate_entry_price_plan(plan, current_price, volume_analysis, trend_score,
+                              kd_cross=None, no_trade_reasons=None):
+    """V2.1：價格階梯的執行條件判斷。"""
+    if not plan:
+        return None
+
+    blocked = list(no_trade_reasons or [])
+    vp_score = volume_analysis.get("score", 50) if volume_analysis else 50
+
+    # 第一層：任何高優先級風險成立，禁止補倉。
+    if blocked or vp_score < 45 or trend_score < 45:
+        status = "BLOCKED"
+        note = "目前風險條件不足，禁止補倉，等待趨勢／量價修復。"
+    else:
+        status = "WAIT"
+        note = "價格區間已建立；實際補倉仍需回到區間並確認止跌／量價條件。"
+
+        if current_price is not None:
+            a1 = plan["add1"]
+            a2 = plan["add2"]
+            if a1["low"] <= current_price <= a1["high"]:
+                if vp_score >= 65 and trend_score >= 60 and kd_cross != "死亡交叉":
+                    status = "ADD1_READY"
+                    note = "進入第一補倉區，且量價／趨勢條件可評估執行。"
+            elif a2["low"] <= current_price <= a2["high"]:
+                if vp_score >= 65 and trend_score >= 55 and kd_cross != "死亡交叉":
+                    status = "ADD2_READY"
+                    note = "進入第二補倉區；僅在支撐有效且未出現放量破位時評估。"
+
+    return {"status": status, "note": note}
+
+
+def calculate_confidence(buy_score, vol_ok, trend_bullish, inst_bullish, no_trade_triggered):
+    """
+    簡化版信心度（依最新規格：技術趨勢／量價／價格位置／籌碼／風險，不做完整6大類權重）。
+    0~100，越高代表各面向訊號越一致。
+    """
+    score = 0
+    score += min(buy_score, 60) / 60 * 40  # 技術趨勢+價格位置（用買入分數當代理，佔40%）
+    score += 20 if vol_ok else 5           # 量價 20%
+    score += 20 if trend_bullish else 5    # 趨勢 20%
+    score += 15 if inst_bullish else 8     # 籌碼 15%（無資料時給中性分）
+    score += 5 if not no_trade_triggered else 0  # 風險 5%
+    score = round(min(100, max(0, score)), 1)
+    if score >= 80:
+        level = "高"
+    elif score >= 65:
+        level = "中高"
+    elif score >= 50:
+        level = "中"
+    else:
+        level = "低"
+    return {"score": score, "level": level}
+
+
+def final_decision(no_trade_reasons, add_result, buy_score, position_status, stop_hit, stop_warning):
+    """
+    最終單一決策，依優先權：STOP > NO_TRADE > REDUCE > ADD > BUY > HOLD > WAIT
+    position_status 是既有的 analyze_position 狀態（有輸入買入價時才有：STOP/REDUCE/ADD/HOLD）。
+    """
+    if stop_hit or position_status == "STOP":
+        return "STOP", "🔴 建議停損"
+    if no_trade_reasons:
+        return "NO_TRADE", "⛔ 不建議交易"
+    if position_status == "REDUCE":
+        return "REDUCE", "🟡 建議減碼／停利"
+    if add_result and add_result.get("type") in ("PULLBACK", "BREAKOUT", "TREND"):
+        return "ADD", "🔵 可考慮補倉"
+    if position_status == "ADD":
+        return "ADD", "🔵 可考慮補倉"
+    if position_status == "HOLD":
+        return "HOLD", "🟢 持有"
+    if buy_score >= 70:
+        return "BUY", "🟢 建議買入" if buy_score >= 80 else "🟢 買入"
+    if buy_score >= 60:
+        return "WAIT", "🟡 等待"
+    if buy_score >= 50:
+        return "WAIT", "🟠 觀察"
+    return "WAIT", "🔴 不建議買進"
+
+
+def build_price_decision(latest, prev, df, strategy_pref="short"):
+    """
+    整合以上模組，產生完整的 V2.1 價格決策物件（不含使用者買入價相關的 position 部分，
+    那個仍由 analyze_position 處理，這裡只算「即時、與個人成本無關」的市場決策）。
+    """
+    close = float(latest["Close"]) if latest["Close"] is not None else None
+    ma5 = float(latest["MA5"]) if latest["MA5"] is not None else None
+    ma20 = float(latest["MA20"]) if latest["MA20"] is not None else None
+    ma60 = float(latest["MA60"]) if latest["MA60"] is not None else None
+    ma20_prev = float(prev["MA20"]) if (prev is not None and prev["MA20"] is not None) else None
+    bb_lower = float(latest["BB_Lower"]) if latest["BB_Lower"] is not None else None
+    bb_upper = float(latest["BB_Upper"]) if latest["BB_Upper"] is not None else None
+    atr14 = float(latest["ATR14"]) if latest["ATR14"] is not None else None
+    volume = float(latest["Volume"]) if latest["Volume"] is not None else None
+    vol_ma20 = float(latest["Vol_MA20"]) if latest["Vol_MA20"] is not None else None
+    macd_hist = float(latest["MACD_Hist"]) if latest["MACD_Hist"] is not None else None
+    macd_hist_prev = float(prev["MACD_Hist"]) if (prev is not None and prev["MACD_Hist"] is not None) else None
+    k = float(latest["K"]) if latest["K"] is not None else None
+    d = float(latest["D"]) if latest["D"] is not None else None
+    pk = float(prev["K"]) if (prev is not None and prev["K"] is not None) else None
+    pd_ = float(prev["D"]) if (prev is not None and prev["D"] is not None) else None
+
+    # 前5日／前20日高低點 — 修正 Bug：不含「今天」自己
+    previous_high5 = float(df["High"].iloc[-6:-1].max()) if len(df) >= 6 else None
+    previous_low5 = float(df["Low"].iloc[-6:-1].min()) if len(df) >= 6 else None
+    previous_high20 = float(df["High"].iloc[-21:-1].max()) if len(df) >= 21 else None
+    previous_low20 = float(df["Low"].iloc[-21:-1].min()) if len(df) >= 21 else None
+
+    support = calculate_support_cluster(close, ma20, bb_lower, previous_low5, previous_low20, atr14)
+    resistance = calculate_resistance_cluster(close, ma20, bb_upper, previous_high5, previous_high20, atr14)
+
+    no_trade_reasons = check_no_trade(ma20, ma20_prev, ma60, close, volume, vol_ma20, macd_hist, macd_hist_prev)
+
+    kd_cross = None
+    if pk is not None and pd_ is not None and k is not None and d is not None:
+        if pk <= pd_ and k > d:
+            kd_cross = "黃金交叉"
+        elif pk >= pd_ and k < d:
+            kd_cross = "死亡交叉"
+
+    macd_improving = (macd_hist is not None and macd_hist_prev is not None and macd_hist > macd_hist_prev)
+    pullback_support = (support is not None and close is not None
+                         and support["zone_low"] <= close <= support["zone_high"] * 1.02)
+    # V2.1：量比統一以20日均量為主，並加入量價效率
+    prev_close = float(prev["Close"]) if (prev is not None and prev["Close"] is not None) else None
+    price_change_pct = ((close - prev_close) / prev_close * 100) if (close is not None and prev_close) else 0.0
+    volume_analysis = calculate_volume_metrics(volume, vol_ma20, price_change_pct)
+    vol_ok = volume_analysis["volume_ratio_20"] is not None and 0.7 <= volume_analysis["volume_ratio_20"] <= 2.5
+
+    buy_score, buy_reasons = calculate_buy_score(
+        ma20, ma60, close, ma5, kd_cross, k, macd_improving,
+        pullback_support, vol_ok, inst_bullish=None, fund_ok=None,
+    )
+    # V2.1：量價效率作為獨立校正，不重複計算單純成交量
+    if volume_analysis["score"] >= 80:
+        buy_score = min(100, buy_score + 8)
+        buy_reasons.append(f"量價：{volume_analysis['status']}")
+    elif volume_analysis["score"] <= 40:
+        buy_score = max(0, buy_score - 8)
+        buy_reasons.append(f"量價警示：{volume_analysis['status']}")
+
+    kd_dead_cross = (kd_cross == "死亡交叉")
+    add_result = calculate_add_engine(
+        close, ma20, ma20_prev, previous_high5, volume, vol_ma20, ma5,
+        macd_hist, macd_hist_prev, kd_dead_cross, None, previous_high20, support,
+    )
+
+    risk = calculate_risk_engine(close, atr14, ma20, previous_low5, strategy_pref, close)
+    profit = calculate_profit_engine(close, previous_high20, atr14, None, bb_upper, ma5, close)
+
+    trend_bullish = (ma20 is not None and ma60 is not None and ma20 > ma60)
+    confidence = calculate_confidence(buy_score, vol_ok, trend_bullish, inst_bullish=False,
+                                       no_trade_triggered=bool(no_trade_reasons))
+
+    action, label = final_decision(
+        no_trade_reasons, add_result, buy_score, position_status=None,
+        stop_hit=(risk["hit"] if risk else False),
+        stop_warning=(risk["warning_triggered"] if risk else False),
+    )
+
+    return {
+        "action": action,
+        "label": label,
+        "score": buy_score,
+        "confidence": confidence,
+        "reasons": buy_reasons,
+        "no_trade_reasons": no_trade_reasons,
+        "price_decision": {
+            "buy": support,
+            "sell": resistance,
+            "add": add_result,
+            "risk": risk,
+            "profit": profit,
+        },
+        "volume_analysis": volume_analysis,
+        "volume_ratio_20": volume_analysis["volume_ratio_20"],
+        "price_change_pct": volume_analysis["price_change_pct"],
+        "volume_price_efficiency": volume_analysis["efficiency"],
+        "volume_status": volume_analysis["status"],
+        "_internal": {  # 給 position 分析重複使用，避免重算
+            "previous_high5": previous_high5, "previous_low5": previous_low5,
+            "previous_high20": previous_high20, "previous_low20": previous_low20,
+            "atr14": atr14, "support": support, "resistance": resistance,
+        },
+    }
+
+
+
+# ===========================================================================
 # /api/stock — 個股健診主端點（後端計算技術指標）
 # 從 FinMind 抓股價 → pandas 算指標 → 回傳 JSON
 # ===========================================================================
@@ -811,7 +1384,8 @@ def get_stock_data():
     # --- 量比 ---
     last_vol = float(latest["Volume"]) if latest["Volume"] is not None else 0
     avg_vol5 = float(latest["Vol_MA5"]) if latest["Vol_MA5"] is not None else 0
-    vol_ratio = last_vol / avg_vol5 if avg_vol5 > 0 else 1.0
+    avg_vol20 = float(latest["Vol_MA20"]) if latest["Vol_MA20"] is not None else 0
+    vol_ratio = last_vol / avg_vol20 if avg_vol20 > 0 else 1.0
 
     # --- 技術面評分 ---
     # 設計說明：
@@ -895,6 +1469,8 @@ def get_stock_data():
             df=df, entry_date=entry_date,
         )
     except Exception:
+        weekly_kd = None
+        revenue_yoy = None
         strategy = {
             "light": "neutral",
             "short": {"action": "觀望", "reasons": ["策略訊號計算發生錯誤"]},
@@ -907,6 +1483,24 @@ def get_stock_data():
     except Exception:
         valuation = None
 
+    # --- V2.1 價格決策引擎（支撐/壓力聚集、核心買賣點±1%、禁止交易、補倉、動態停損停利、信心度）---
+    strategy_pref = request.args.get("strategy_pref", "short").strip()
+    if strategy_pref not in ("short", "mid"):
+        strategy_pref = "short"
+    try:
+        decision = build_price_decision(latest, prev, df, strategy_pref=strategy_pref)
+        if valuation and not valuation.get("_error"):
+            # 有估值資料時，把估值目標價納入第二停利參考（重算一次 profit）
+            atr14_v = float(latest["ATR14"]) if latest["ATR14"] is not None else None
+            prev_high20_v = decision["_internal"]["previous_high20"]
+            bb_upper_v = float(latest["BB_Upper"]) if latest["BB_Upper"] is not None else None
+            ma5_v = float(latest["MA5"]) if latest["MA5"] is not None else None
+            decision["price_decision"]["profit"] = calculate_profit_engine(
+                float(latest["Close"]), prev_high20_v, atr14_v, valuation, bb_upper_v, ma5_v, float(latest["Close"])
+            )
+    except Exception:
+        decision = None
+
     # --- 持股價格即時分析（選填，不存檔，當下輸入當下算）---
     # 用 Exception 而非只抓 ValueError/TypeError，確保這個選填功能萬一
     # 出現任何未預期錯誤，也只會讓「持股分析」這張卡片顯示不出來，
@@ -918,9 +1512,6 @@ def get_stock_data():
             buy_price = float(buy_price_arg)
             shares_arg = request.args.get("shares", "").strip()
             shares = float(shares_arg) if shares_arg else None
-            strategy_pref = request.args.get("strategy_pref", "short").strip()
-            if strategy_pref not in ("short", "mid"):
-                strategy_pref = "short"
             recent_n5 = min(5, len(df))
             recent_high5 = float(df["High"].iloc[-recent_n5:].max())
             position = analyze_position(
@@ -933,9 +1524,44 @@ def get_stock_data():
                 float(latest["Volume"]) if latest["Volume"] is not None else None,
                 float(latest["Vol_MA5"]) if latest["Vol_MA5"] is not None else None,
                 strategy["short"], strategy["mid"], valuation,
+                atr14=float(latest["ATR14"]) if latest["ATR14"] is not None else None,
+                support=decision["_internal"]["support"],
+                resistance=decision["_internal"]["resistance"],
+                previous_low20=decision["_internal"]["previous_low20"],
+                previous_high20=decision["_internal"]["previous_high20"],
+                volume_analysis=decision.get("volume_analysis"),
+                trend_score=decision.get("score", 50),
+                no_trade_reasons=decision.get("no_trade_reasons"),
+                kd_cross=kd_cross,
             )
+            # --- V2.1：用引擎的動態停損/補倉/停利取代原本的粗略估算，並用決策優先權重新裁決最終動作 ---
+            if decision is not None:
+                atr14_p = decision["_internal"]["atr14"]
+                prev_low5_p = decision["_internal"]["previous_low5"]
+                risk_v2 = calculate_risk_engine(
+                    buy_price, atr14_p,
+                    float(latest["MA20"]) if latest["MA20"] is not None else None,
+                    prev_low5_p, strategy_pref, float(latest["Close"]),
+                )
+                position["risk_v2"] = risk_v2
+                position["add_zone"] = decision["price_decision"]["add"]
+                position["profit_v2"] = decision["price_decision"]["profit"]
+                position["confidence"] = decision["confidence"]
+                if risk_v2:
+                    position["stop_loss"] = risk_v2["stop"]  # 用ATR動態停損覆蓋原本的簡易停損
+                final_action, final_label = final_decision(
+                    decision["no_trade_reasons"], decision["price_decision"]["add"],
+                    decision["score"], position_status=position["status"],
+                    stop_hit=(risk_v2["hit"] if risk_v2 else False),
+                    stop_warning=(risk_v2["warning_triggered"] if risk_v2 else False),
+                )
+                position["final_action"] = final_action
+                position["final_label"] = final_label
         except Exception:
             position = None
+
+    if decision is not None and "_internal" in decision:
+        del decision["_internal"]  # 內部欄位，不需要回傳給前端
 
     result = {
         "status": 200,
@@ -974,7 +1600,12 @@ def get_stock_data():
         "vol": {
             "last": last_vol,
             "avg5": avg_vol5,
+            "avg20": avg_vol20,
             "ratio": round(vol_ratio, 2),
+            "ratio_basis": "20日均量",
+            "price_change_pct": round(price_change_pct or 0, 2),
+            "efficiency": decision.get("volume_price_efficiency") if decision else None,
+            "status": decision.get("volume_status") if decision else "資料不足",
         },
         "recent": {
             "high": recent_high,
@@ -991,7 +1622,10 @@ def get_stock_data():
         "score_max": score_max,
         "score_pct": score_pct,
         "strategy": strategy,
+        "weekly_kd": weekly_kd,
+        "revenue_yoy": revenue_yoy,
         "valuation": valuation,
+        "decision": decision,
         "position": position,
     }
     return jsonify(result)
