@@ -29,6 +29,7 @@ import pandas as pd
 import math
 import json
 import hashlib
+import threading
 from pathlib import Path
 
 app = Flask(__name__)
@@ -54,6 +55,8 @@ QUOTA_WINDOW_SECONDS = 3600
 QUOTA_LIMIT_ANON = int(os.environ.get("FINMIND_SAFE_LIMIT_ANON", "280"))
 QUOTA_LIMIT_TOKEN = int(os.environ.get("FINMIND_SAFE_LIMIT_TOKEN", "580"))
 _QUOTA_FILE = CACHE_DIR / "finmind_quota.json"
+_QUOTA_LOCK = threading.Lock()
+_FINMIND_BLOCKED_UNTIL = 0.0
 
 def _cache_key(params):
     payload = json.dumps(params, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -62,10 +65,13 @@ def _cache_key(params):
 def _cache_file(params):
     return CACHE_DIR / f"finmind_{_cache_key(params)}.json"
 
-def _read_disk_cache(params):
+def _read_disk_cache(params, allow_stale=False):
     path = _cache_file(params)
     try:
-        if not path.exists() or time.time() - path.stat().st_mtime > FINMIND_CACHE_TTL:
+        if not path.exists():
+            return None
+        expired = time.time() - path.stat().st_mtime > FINMIND_CACHE_TTL
+        if expired and not allow_stale:
             return None
         with path.open("r", encoding="utf-8") as f:
             obj = json.load(f)
@@ -88,24 +94,41 @@ def _write_disk_cache(params, data):
         except Exception:
             pass
 
-def _load_quota_log():
+def _load_quota_state():
     try:
         with _QUOTA_FILE.open("r", encoding="utf-8") as f:
             obj = json.load(f)
-        calls = [float(x) for x in obj.get("calls", []) if time.time() - float(x) < QUOTA_WINDOW_SECONDS]
-        return calls
+        now = time.time()
+        calls = [float(x) for x in obj.get("calls", []) if now - float(x) < QUOTA_WINDOW_SECONDS]
+        blocked_until = float(obj.get("blocked_until", 0) or 0)
+        return calls, blocked_until
     except Exception:
-        return []
+        return [], 0.0
 
-def _save_quota_log(calls):
+def _save_quota_state(calls, blocked_until=0.0):
     try:
-        with _QUOTA_FILE.open("w", encoding="utf-8") as f:
-            json.dump({"calls": calls}, f)
+        tmp = _QUOTA_FILE.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump({"calls": calls, "blocked_until": blocked_until}, f)
+        tmp.replace(_QUOTA_FILE)
     except Exception:
         pass
 
+def _load_quota_log():
+    calls, _ = _load_quota_state()
+    return calls
+
+def _set_finmind_block(seconds=3600):
+    global _FINMIND_BLOCKED_UNTIL
+    until = time.time() + seconds
+    _FINMIND_BLOCKED_UNTIL = max(_FINMIND_BLOCKED_UNTIL, until)
+    with _QUOTA_LOCK:
+        calls, file_until = _load_quota_state()
+        _save_quota_state(calls, max(file_until, _FINMIND_BLOCKED_UNTIL))
+
 def finmind_quota_status():
-    calls = _load_quota_log()
+    calls, file_until = _load_quota_state()
+    blocked_until = max(_FINMIND_BLOCKED_UNTIL, file_until)
     limit = QUOTA_LIMIT_TOKEN if FINMIND_TOKEN else QUOTA_LIMIT_ANON
     return {
         "window_seconds": QUOTA_WINDOW_SECONDS,
@@ -113,16 +136,24 @@ def finmind_quota_status():
         "safe_limit": limit,
         "remaining_safe": max(0, limit - len(calls)),
         "has_token": bool(FINMIND_TOKEN),
+        "provider_blocked": time.time() < blocked_until,
+        "blocked_seconds": max(0, int(blocked_until - time.time())),
     }
 
 def _quota_allows_request():
-    calls = _load_quota_log()
-    limit = QUOTA_LIMIT_TOKEN if FINMIND_TOKEN else QUOTA_LIMIT_ANON
-    if len(calls) >= limit:
-        return False, len(calls), limit
-    calls.append(time.time())
-    _save_quota_log(calls)
-    return True, len(calls), limit
+    now = time.time()
+    with _QUOTA_LOCK:
+        calls, file_until = _load_quota_state()
+        blocked_until = max(_FINMIND_BLOCKED_UNTIL, file_until)
+        if now < blocked_until:
+            return False, len(calls), (QUOTA_LIMIT_TOKEN if FINMIND_TOKEN else QUOTA_LIMIT_ANON), "provider_blocked"
+        limit = QUOTA_LIMIT_TOKEN if FINMIND_TOKEN else QUOTA_LIMIT_ANON
+        if len(calls) >= limit:
+            return False, len(calls), limit, "safe_limit"
+        calls.append(now)
+        _save_quota_state(calls, 0.0)
+        return True, len(calls), limit, None
+
 
 # ===========================================================================
 # 交易成本設定（依使用者目前規格）
@@ -181,20 +212,25 @@ def calculate_net_position_pnl(buy_price, current_price, lots):
 
 def finmind_get(params, timeout=20):
     """
-    V2.4 統一 FinMind 請求入口：
-    1) 先讀磁碟快取；2) 只有 cache miss 才消耗 API 配額；
-    3) 滾動 60 分鐘達安全上限後自動停止新增請求；
-    4) 成功資料落地，之後回測不再重複下載。
-    回傳 (raw_data_list, error_msg or None)。
+    V2.4.1 強化版 FinMind 請求入口：
+    1) cache-first；2) 只有 cache miss 才計入配額；
+    3) Provider 回傳 402 後立即全域熔斷 60 分鐘，禁止所有後續重試；
+    4) 配額被保護時若存在舊快取，允許 stale cache 作為降級資料；
+    5) 不再因同一個配額錯誤重複 fallback 請求。
     """
     cached = _read_disk_cache(params)
     if cached is not None:
         return cached, None
 
-    allowed, used, limit = _quota_allows_request()
+    allowed, used, limit, reason = _quota_allows_request()
     if not allowed:
+        stale = _read_disk_cache(params, allow_stale=True)
+        if stale is not None:
+            return stale, "FinMind 暫停新增請求，已使用本地舊快取資料"
+        if reason == "provider_blocked":
+            return [], f"FinMind 配額已進入保護冷卻期，約剩 {_load_quota_state()[1] - time.time():.0f} 秒；禁止重試以避免再次耗盡配額"
         return [], (f"FinMind 配額保護已啟動：近 60 分鐘已使用 {used}/{limit} 次安全額度。"
-                    "已停止新增 API 請求；已有本地快取仍可正常回測。")
+                    "已停止新增 API 請求；已有本地快取仍可使用。")
 
     headers = {}
     if FINMIND_TOKEN:
@@ -212,9 +248,14 @@ def finmind_get(params, timeout=20):
         status = j.get("status")
         msg = j.get("msg", "")
         if status == 402:
-            return [], f"FinMind API 配額已用盡（{msg}）；系統已停止重試，請稍後再試或設定 FINMIND_TOKEN"
+            _set_finmind_block(3600)
+            stale = _read_disk_cache(params, allow_stale=True)
+            if stale is not None:
+                return stale, f"FinMind 配額已用盡，已切換舊快取並停止後續重試（{msg}）"
+            return [], f"FinMind API 配額已用盡（{msg}）；系統已進入 60 分鐘熔斷，停止所有重試"
         if status == 403:
-            return [], f"FinMind API 暫時限制存取（{msg}），系統已停止重試"
+            _set_finmind_block(600)
+            return [], f"FinMind API 暫時限制存取（{msg}）；系統已進入 10 分鐘保護"
         return [], f"FinMind API 錯誤（狀態碼 {status}）：{msg}"
     return data, None
 
@@ -418,6 +459,7 @@ def calc_weekly_kd9(df):
 # 簡易記憶體快取（用於降低 FinMind API 用量 — 同一支股票短時間內
 # 重複查詢時不用重新打 API，直接吃快取，大幅減少每小時的請求數）
 _revenue_cache = {}   # {stock_id: (ts, value)}
+_revenue_raw_cache = {}  # {stock_id: (ts, rows)}
 _per_stats_cache = {}  # {stock_id: (ts, value)}
 _REVENUE_CACHE_TTL = 86400   # 24小時（月營收一個月才更新一次）
 _PER_CACHE_TTL = 43200       # 12小時
@@ -444,6 +486,7 @@ def fetch_revenue_yoy(stock_id):
         if not data:
             result = None
         else:
+            _revenue_raw_cache[stock_id] = (now_ts, data)
             data = sorted(data, key=lambda r: (r.get("revenue_year", 0), r.get("revenue_month", 0)))
             latest = data[-1]
             ly, lm = latest.get("revenue_year"), latest.get("revenue_month")
@@ -485,13 +528,15 @@ def fetch_market_environment(lookback_days=600):
         "end_date": end_date,
     }, timeout=30)
     if err or not raw:
-        # FinMind 若以 001 表示加權指數，退回 001
-        raw, err = finmind_get({
-            "dataset": "TaiwanStockPrice",
-            "data_id": "001",
-            "start_date": start_date,
-            "end_date": end_date,
-        }, timeout=30)
+        # 只有「查無資料」才允許 fallback；若是配額/權限錯誤，禁止再打一筆 API。
+        quota_or_limit_error = err and any(x in str(err) for x in ["配額", "402", "限制存取", "熔斷", "冷卻"])
+        if not quota_or_limit_error:
+            raw, err = finmind_get({
+                "dataset": "TaiwanStockPrice",
+                "data_id": "001",
+                "start_date": start_date,
+                "end_date": end_date,
+            }, timeout=30)
     if err or not raw:
         return {}, err or "查無加權指數資料"
 
@@ -1661,16 +1706,10 @@ def get_stock_data():
     if not stock_id.isdigit():
         return jsonify({"status": 400, "msg": "請輸入數字股票代號"}), 400
 
-    # --- Step 1: 取得股票資訊（名稱、產業）---
+    # --- Step 1: 代號查詢不再額外呼叫 TaiwanStockInfo ---
+    # 名稱查詢由前端另行處理；數字代號健診優先保留 FinMind 配額給核心股價資料。
     stock_name = ""
     industry = ""
-    try:
-        info_data, _err = finmind_get({"dataset": "TaiwanStockInfo", "data_id": stock_id}, timeout=15)
-        if info_data:
-            stock_name = info_data[0].get("stock_name", "")
-            industry = info_data[0].get("industry_category", "")
-    except Exception:
-        pass
 
     # --- Step 2: 從 FinMind 抓股價（拉長區間以利週KD計算）---
     end_date = datetime.now().strftime("%Y-%m-%d")
@@ -2012,6 +2051,7 @@ def get_stock_data():
         "strategy": strategy,
         "weekly_kd": weekly_kd,
         "revenue_yoy": revenue_yoy,
+        "revenue_data": (_revenue_raw_cache.get(stock_id, (0, []))[1] if stock_id in _revenue_raw_cache else []),
         "valuation": valuation,
         "decision": decision,
         "position": position,
