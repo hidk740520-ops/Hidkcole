@@ -27,6 +27,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 import pandas as pd
 import math
+import json
+import hashlib
+from pathlib import Path
 
 app = Flask(__name__)
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
@@ -35,6 +38,91 @@ FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 # 就會帶上 Authorization header，使用個人配額而非匿名共用配額，
 # 可大幅降低「查無資料」其實是配額用盡／IP 被暫時限制的機率。
 FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "").strip()
+
+# ===========================================================================
+# V2.4 資料快取＋API 配額保護
+# ---------------------------------------------------------------------------
+# 核心原則：同一組 FinMind 查詢只下載一次，後續回測優先讀本地快取。
+# FinMind 一般配額以「時間窗」計算，因此這裡採 60 分鐘滾動計數，並保留
+# 安全餘額，避免系統自己把官方配額打滿。可用環境變數調整。
+# ===========================================================================
+CACHE_DIR = Path(os.environ.get("STOCK_CACHE_DIR", ".cache_stock"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+FINMIND_CACHE_TTL = int(os.environ.get("FINMIND_CACHE_TTL", str(7 * 86400)))
+QUOTA_WINDOW_SECONDS = 3600
+# 官方常見上限約 300/600；預留 20 次安全空間，避免邊界誤差。
+QUOTA_LIMIT_ANON = int(os.environ.get("FINMIND_SAFE_LIMIT_ANON", "280"))
+QUOTA_LIMIT_TOKEN = int(os.environ.get("FINMIND_SAFE_LIMIT_TOKEN", "580"))
+_QUOTA_FILE = CACHE_DIR / "finmind_quota.json"
+
+def _cache_key(params):
+    payload = json.dumps(params, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+def _cache_file(params):
+    return CACHE_DIR / f"finmind_{_cache_key(params)}.json"
+
+def _read_disk_cache(params):
+    path = _cache_file(params)
+    try:
+        if not path.exists() or time.time() - path.stat().st_mtime > FINMIND_CACHE_TTL:
+            return None
+        with path.open("r", encoding="utf-8") as f:
+            obj = json.load(f)
+        if obj.get("ok"):
+            return obj.get("data", [])
+    except Exception:
+        return None
+    return None
+
+def _write_disk_cache(params, data):
+    path = _cache_file(params)
+    tmp = path.with_suffix(".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump({"ok": True, "saved_at": time.time(), "data": data}, f, ensure_ascii=False)
+        tmp.replace(path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+def _load_quota_log():
+    try:
+        with _QUOTA_FILE.open("r", encoding="utf-8") as f:
+            obj = json.load(f)
+        calls = [float(x) for x in obj.get("calls", []) if time.time() - float(x) < QUOTA_WINDOW_SECONDS]
+        return calls
+    except Exception:
+        return []
+
+def _save_quota_log(calls):
+    try:
+        with _QUOTA_FILE.open("w", encoding="utf-8") as f:
+            json.dump({"calls": calls}, f)
+    except Exception:
+        pass
+
+def finmind_quota_status():
+    calls = _load_quota_log()
+    limit = QUOTA_LIMIT_TOKEN if FINMIND_TOKEN else QUOTA_LIMIT_ANON
+    return {
+        "window_seconds": QUOTA_WINDOW_SECONDS,
+        "used": len(calls),
+        "safe_limit": limit,
+        "remaining_safe": max(0, limit - len(calls)),
+        "has_token": bool(FINMIND_TOKEN),
+    }
+
+def _quota_allows_request():
+    calls = _load_quota_log()
+    limit = QUOTA_LIMIT_TOKEN if FINMIND_TOKEN else QUOTA_LIMIT_ANON
+    if len(calls) >= limit:
+        return False, len(calls), limit
+    calls.append(time.time())
+    _save_quota_log(calls)
+    return True, len(calls), limit
 
 # ===========================================================================
 # 交易成本設定（依使用者目前規格）
@@ -93,12 +181,21 @@ def calculate_net_position_pnl(buy_price, current_price, lots):
 
 def finmind_get(params, timeout=20):
     """
-    統一的 FinMind 請求入口。
+    V2.4 統一 FinMind 請求入口：
+    1) 先讀磁碟快取；2) 只有 cache miss 才消耗 API 配額；
+    3) 滾動 60 分鐘達安全上限後自動停止新增請求；
+    4) 成功資料落地，之後回測不再重複下載。
     回傳 (raw_data_list, error_msg or None)。
-    - 若有 FINMIND_TOKEN，自動帶 Authorization header（提升配額上限）
-    - 若 FinMind 回傳非 200（如 402 配額用盡、403 IP 暫時限制），
-      不再誤判為「查無資料」，而是把真正原因往上帶
     """
+    cached = _read_disk_cache(params)
+    if cached is not None:
+        return cached, None
+
+    allowed, used, limit = _quota_allows_request()
+    if not allowed:
+        return [], (f"FinMind 配額保護已啟動：近 60 分鐘已使用 {used}/{limit} 次安全額度。"
+                    "已停止新增 API 請求；已有本地快取仍可正常回測。")
+
     headers = {}
     if FINMIND_TOKEN:
         headers["Authorization"] = f"Bearer {FINMIND_TOKEN}"
@@ -109,13 +206,15 @@ def finmind_get(params, timeout=20):
         return [], f"連線 FinMind 失敗: {e}"
 
     data = j.get("data", [])
+    if data:
+        _write_disk_cache(params, data)
     if not data and j.get("status") not in (200, None):
         status = j.get("status")
         msg = j.get("msg", "")
         if status == 402:
-            return [], f"FinMind API 配額已用盡（{msg}），請稍後再試，或設定 FINMIND_TOKEN 以取得個人配額"
+            return [], f"FinMind API 配額已用盡（{msg}）；系統已停止重試，請稍後再試或設定 FINMIND_TOKEN"
         if status == 403:
-            return [], f"FinMind API 暫時限制存取（{msg}），請等待約 30 分鐘後再試"
+            return [], f"FinMind API 暫時限制存取（{msg}），系統已停止重試"
         return [], f"FinMind API 錯誤（狀態碼 {status}）：{msg}"
     return data, None
 
@@ -156,6 +255,22 @@ _SECTOR_FLOW_TTL = 3600  # 秒
 
 
 # ===========================================================================
+# /api/quota — API 配額保護狀態
+# ===========================================================================
+@app.route("/api/quota")
+def get_quota_status():
+    status = finmind_quota_status()
+    try:
+        cache_files = list(CACHE_DIR.glob("finmind_*.json"))
+        status["cached_datasets"] = len(cache_files)
+    except Exception:
+        status["cached_datasets"] = None
+    status["cache_ttl_hours"] = round(FINMIND_CACHE_TTL / 3600, 1)
+    status["policy"] = "cache-first；cache miss 才消耗 API；達安全額度自動停止新增請求"
+    return jsonify({"status": 200, **status})
+
+
+# ===========================================================================
 # 首頁
 # ===========================================================================
 @app.route("/")
@@ -181,12 +296,10 @@ def proxy_finmind():
         params["start_date"] = start_date
     if end_date:
         params["end_date"] = end_date
-    try:
-        headers = {"Authorization": f"Bearer {FINMIND_TOKEN}"} if FINMIND_TOKEN else {}
-        resp = requests.get(FINMIND_URL, params=params, headers=headers, timeout=15)
-        return jsonify(resp.json()), resp.status_code
-    except requests.RequestException as e:
-        return jsonify({"status": 500, "msg": f"連線 FinMind 失敗: {e}", "data": []}), 500
+    data, err = finmind_get(params, timeout=15)
+    if err:
+        return jsonify({"status": 429 if "配額" in err else 502, "msg": err, "data": []}), 429 if "配額" in err else 502
+    return jsonify({"status": 200, "data": data})
 
 
 # ===========================================================================
@@ -350,7 +463,109 @@ def fetch_revenue_yoy(stock_id):
     return result
 
 
-def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_lots=1):
+
+# ===========================================================================
+# 大盤環境引擎：以台灣加權指數 001 為基準，所有判斷只使用訊號日前已知資料
+# ===========================================================================
+_market_cache = {"data": None, "ts": 0}
+_MARKET_CACHE_TTL = 86400
+
+def fetch_market_environment(lookback_days=600):
+    """取得加權指數歷史資料並建立每日市場環境。禁止使用未來資料。"""
+    now_ts = time.time()
+    if _market_cache["data"] is not None and now_ts - _market_cache["ts"] < _MARKET_CACHE_TTL:
+        return _market_cache["data"], None
+
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    raw, err = finmind_get({
+        "dataset": "TaiwanStockPrice",
+        "data_id": "TAIEX",
+        "start_date": start_date,
+        "end_date": end_date,
+    }, timeout=30)
+    if err or not raw:
+        # FinMind 若以 001 表示加權指數，退回 001
+        raw, err = finmind_get({
+            "dataset": "TaiwanStockPrice",
+            "data_id": "001",
+            "start_date": start_date,
+            "end_date": end_date,
+        }, timeout=30)
+    if err or not raw:
+        return {}, err or "查無加權指數資料"
+
+    m = pd.DataFrame(raw)
+    # 不同資料版本可能使用不同欄名
+    def pick(*names):
+        for n in names:
+            if n in m.columns:
+                return n
+        return None
+    close_col = pick("close", "Close", "收盤價")
+    high_col = pick("max", "high", "High", "最高價")
+    low_col = pick("min", "low", "Low", "最低價")
+    open_col = pick("open", "Open", "開盤價")
+    vol_col = pick("Trading_Volume", "volume", "Volume", "成交量")
+    date_col = pick("date", "Date")
+    if not close_col or not date_col:
+        return {}, "加權指數資料欄位格式無法辨識"
+
+    m["Close"] = pd.to_numeric(m[close_col], errors="coerce")
+    m["High"] = pd.to_numeric(m[high_col], errors="coerce") if high_col else m["Close"]
+    m["Low"] = pd.to_numeric(m[low_col], errors="coerce") if low_col else m["Close"]
+    m["Open"] = pd.to_numeric(m[open_col], errors="coerce") if open_col else m["Close"]
+    m["Volume"] = pd.to_numeric(m[vol_col], errors="coerce") if vol_col else 0
+    m["Date"] = m[date_col].astype(str)
+    m = m.dropna(subset=["Close"]).sort_values("Date").reset_index(drop=True)
+    if len(m) < 65:
+        return {}, "加權指數歷史資料不足"
+
+    m["MA5"] = m["Close"].rolling(5).mean()
+    m["MA20"] = m["Close"].rolling(20).mean()
+    m["MA60"] = m["Close"].rolling(60).mean()
+    m["Ret5"] = m["Close"].pct_change(5) * 100
+    m["Ret20"] = m["Close"].pct_change(20) * 100
+    m["VolMA20"] = m["Volume"].rolling(20).mean()
+    m["VolRatio20"] = m["Volume"] / m["VolMA20"].replace(0, pd.NA)
+    m["VolPrice"] = m["Ret5"] / m["VolRatio20"].replace(0, pd.NA)
+    m["Volatility20"] = m["Close"].pct_change().rolling(20).std() * (252 ** 0.5) * 100
+
+    env = {}
+    for _, r in m.iterrows():
+        date = str(r["Date"])[:10]
+        vals = [r[x] for x in ["Close","MA5","MA20","MA60","Ret5","Ret20","VolRatio20","Volatility20"]]
+        if any(pd.isna(x) for x in vals):
+            continue
+        score = 50.0
+        score += 12 if r["Close"] > r["MA20"] else -12
+        score += 12 if r["MA20"] > r["MA60"] else -12
+        score += max(-10, min(10, float(r["Ret20"]) * 0.8))
+        score += 6 if r["Ret5"] > 0 else -6
+        # 大量上漲加分；大量下跌扣分
+        if r["VolRatio20"] >= 1.3:
+            score += 5 if r["Ret5"] > 0 else -5
+        score = max(0, min(100, score))
+        if score >= 85: regime = "強多頭"
+        elif score >= 70: regime = "多頭"
+        elif score >= 50: regime = "中性"
+        elif score >= 30: regime = "空頭"
+        else: regime = "強空頭"
+        env[date] = {
+            "score": round(score, 1),
+            "regime": regime,
+            "close": round(float(r["Close"]), 2),
+            "ma20": round(float(r["MA20"]), 2),
+            "ma60": round(float(r["MA60"]), 2),
+            "ret5": round(float(r["Ret5"]), 2),
+            "ret20": round(float(r["Ret20"]), 2),
+            "vol_ratio20": round(float(r["VolRatio20"]), 2),
+            "volatility20": round(float(r["Volatility20"]), 2),
+        }
+    _market_cache.update({"data": env, "ts": now_ts})
+    return env, None
+
+def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_lots=1, market_env=None):
     """
     短線策略歷史回測。
     除原始毛報酬外，同時計入買進手續費、賣出手續費與賣出證交稅，
@@ -386,6 +601,10 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
 
     df = calculate_indicators(df)
     df = df.where(pd.notnull(df), None)
+    if market_env is None:
+        market_env, _market_err = fetch_market_environment(lookback_days=lookback_days + 100)
+    else:
+        _market_err = None
 
     signals = []
     for i in range(1, len(df) - hold_days):
@@ -415,9 +634,22 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
             net_proceeds = sell_cost["market_value"] - sell_cost["fee"] - sell_cost["tax"]
             net_pnl = net_proceeds - original_cost
             net_return_pct = net_pnl / original_cost * 100 if original_cost else 0
+            me = market_env.get(str(cur["Date"])[:10], {}) if market_env else {}
+            # 同期間大盤報酬，用來計算策略 alpha；只比較歷史已知的市場結果
+            market_exit = None
+            if market_env:
+                exit_date = str(df.iloc[i + hold_days]["Date"])[:10]
+                market_entry = me.get("close")
+                market_exit = market_env.get(exit_date, {}).get("close")
+            market_return_pct = ((market_exit - market_entry) / market_entry * 100) if market_entry and market_exit else None
+            alpha_pct = (net_return_pct - market_return_pct) if market_return_pct is not None else None
             signals.append({
                 "date": cur["Date"],
                 "exit_date": df.iloc[i + hold_days]["Date"],
+                "market_score": (market_env.get(str(cur["Date"])[:10], {}) or {}).get("score"),
+                "market_regime": (market_env.get(str(cur["Date"])[:10], {}) or {}).get("regime", "未知"),
+                "market_ret5_pct": (market_env.get(str(cur["Date"])[:10], {}) or {}).get("ret5"),
+                "market_ret20_pct": (market_env.get(str(cur["Date"])[:10], {}) or {}).get("ret20"),
                 "entry": entry_price,
                 "exit": exit_price,
                 "gross_return_pct": round(gross_return_pct, 3),
@@ -427,11 +659,13 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
                 "sell_fee": sell_cost["fee"],
                 "sell_tax": sell_cost["tax"],
                 "total_cost": buy_cost["fee"] + sell_cost["fee"] + sell_cost["tax"],
+                "market_return_pct": round(market_return_pct, 3) if market_return_pct is not None else None,
+                "alpha_pct": round(alpha_pct, 3) if alpha_pct is not None else None,
             })
 
     if not signals:
         return {"stock_id": stock_id, "signal_count": 0, "win_rate": None,
-                "avg_return": None, "net_avg_return": None, "signals": []}
+                "avg_return": None, "net_avg_return": None, "signals": [], "_all_signals": []}
 
     wins_gross = sum(1 for s in signals if s["gross_return_pct"] > 0)
     wins_net = sum(1 for s in signals if s["net_return_pct"] > 0)
@@ -450,6 +684,7 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
         "total_sell_fee": round(sum(s["sell_fee"] for s in signals)),
         "total_sell_tax": round(sum(s["sell_tax"] for s in signals)),
         "signals": signals[-5:],
+        "_all_signals": signals,
         "all_net_returns": net_values,
     }
 
@@ -487,6 +722,22 @@ def calculate_strategy_performance(results):
     gross_profit = sum(x for x in all_returns if x > 0)
     gross_loss = abs(sum(x for x in all_returns if x < 0))
     profit_factor = gross_profit / gross_loss if gross_loss else None
+    # 依「訊號當下」的大盤環境分組，驗證策略是否只在多頭有效。
+    regime_stats = {}
+    for regime in ["強多頭", "多頭", "中性", "空頭", "強空頭", "未知"]:
+        rr = [s for r in valid for s in r.get("_all_signals", []) if s.get("market_regime", "未知") == regime]
+        if not rr:
+            continue
+        rets = [float(s["net_return_pct"]) for s in rr]
+        alphas = [float(s["alpha_pct"]) for s in rr if s.get("alpha_pct") is not None]
+        regime_stats[regime] = {
+            "signals": len(rr),
+            "win_rate": round(sum(x > 0 for x in rets) / len(rets) * 100, 1),
+            "avg_net_return": round(sum(rets) / len(rets), 3),
+            "total_net_pnl": round(sum(float(s.get("net_pnl", 0)) for s in rr)),
+            "avg_alpha": round(sum(alphas) / len(alphas), 3) if alphas else None,
+        }
+
     return {
         "total_signals": total_signals,
         "stock_count": len(valid),
@@ -495,6 +746,8 @@ def calculate_strategy_performance(results):
         "approx_compound_return": round((equity - 1) * 100, 2),
         "max_drawdown": round(max_dd, 2),
         "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
+        "regime_stats": regime_stats,
+        "market_adjusted_win_rate": round(sum(1 for s in [x for r in valid for x in r.get("_all_signals", [])] if s.get("alpha_pct") is not None and s.get("alpha_pct") > 0) / max(1, sum(1 for r in valid for s in r.get("_all_signals", []) if s.get("alpha_pct") is not None)) * 100, 1),
         "total_net_pnl": round(total_net_pnl),
         "total_trading_cost": round(total_cost),
         "total_buy_fee": round(total_buy_fee),
@@ -1926,28 +2179,39 @@ def get_backtest():
     else:
         target_stocks = default_stocks
 
-    cache_key = ",".join(sorted(target_stocks))
+    lookback_days = 500
+    hold_days = 5
+    cache_key = "v24|" + ",".join(sorted(target_stocks)) + f"|{lookback_days}|{hold_days}"
     now_ts = time.time()
     cached = _backtest_cache.get(cache_key)
     if cached and (now_ts - cached[0]) < _BACKTEST_TTL:
         return jsonify({"status": 200, "cached": True, **cached[1]})
 
-    lookback_days = 500
-    hold_days = 5
-
+    market_env, market_err = fetch_market_environment(lookback_days=lookback_days + 100)
     results = []
     for sid in target_stocks:
         try:
-            r = backtest_short_strategy(sid, lookback_days=lookback_days, hold_days=hold_days)
+            r = backtest_short_strategy(sid, lookback_days=lookback_days, hold_days=hold_days, market_env=market_env)
         except Exception as e:
             r = {"stock_id": sid, "error": str(e)}
         results.append(r)
 
     overall = calculate_strategy_performance(results)
+    # 回傳前移除內部完整訊號，避免 API 負載過大；績效統計已在後端完成。
+    for _r in results:
+        _r.pop("_all_signals", None)
     result = {
         "period_days": lookback_days,
         "hold_days": hold_days,
         "backtest_lots": 1,
+        "market_environment": {
+            "benchmark": "台灣加權指數",
+            "data_id": "001 / TAIEX",
+            "available": bool(market_env),
+            "error": market_err,
+            "regime_method": "MA20/MA60 + 5/20日報酬 + 20日量價環境",
+            "no_future_data": True
+        },
         "cost_rules": {
             "broker_fee_rate": BROKER_FEE_RATE,
             "sell_tax_rate": TRADING_TAX_RATE,
