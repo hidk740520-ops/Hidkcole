@@ -9,35 +9,48 @@
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --bg:#0a0e1a; --bg2:#111827; --card:#1a2035; --card2:#1e293b;
-  --border:#2d3748; --text:#e2e8f0; --text-dim:#94a3b8;
-  --red:#ef4444; --red-bg:rgba(239,68,68,.12); --green:#22c55e; --green-bg:rgba(34,197,94,.12);
-  --yellow:#eab308; --orange:#f97316; --blue:#3b82f6; --purple:#a855f7;
+  /* 護眼深色主題：降低亮度對比、降低顏色飽和度，減少長時間閱讀的視覺疲勞 */
+  --bg:#1a1d24; --bg2:#20242c; --card:#262a33; --card2:#2e333c;
+  --border:#3c4150; --text:#ccd1db; --text-dim:#8b91a1; --heading:#eef0f4;
+  --red:#df6a63; --red-bg:rgba(223,106,99,.14); --green:#5cb37e; --green-bg:rgba(92,179,126,.14);
+  --yellow:#d3a54a; --yellow-bg:rgba(211,165,74,.14); --orange:#d68a52; --blue:#5e8fd6; --purple:#9c85cf;
+  --blue-hover:#4d78b8;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+body{font-family:'Noto Sans TC',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;line-height:1.5}
 .mono{font-family:'Roboto Mono',monospace}
 a{color:var(--blue);text-decoration:none}
 a:hover{text-decoration:underline}
 
 /* Header */
-.header{background:linear-gradient(135deg,#0a0e1a 0%,#1a2035 100%);border-bottom:1px solid var(--border);padding:20px 24px}
+.header{background:linear-gradient(135deg,var(--bg) 0%,var(--card) 100%);border-bottom:1px solid var(--border);padding:20px 24px}
 .header-top{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-.header h1{font-family:'Noto Serif TC',serif;font-size:1.6rem;font-weight:700;color:#fff;white-space:nowrap}
+.header h1{font-family:'Noto Serif TC',serif;font-size:1.6rem;font-weight:700;color:var(--heading);white-space:nowrap}
 .stock-info{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 .stock-id{font-family:'Roboto Mono',monospace;font-size:1.1rem;color:var(--blue);font-weight:700}
-.stock-name{font-size:1.2rem;font-weight:700;color:#fff}
+.stock-name{font-size:1.2rem;font-weight:700;color:var(--heading)}
 .report-time{margin-left:auto;font-size:.85rem;color:var(--text-dim);font-family:'Roboto Mono',monospace}
 
 /* Search bar */
 .search-bar{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
-.search-bar input{flex:1;min-width:200px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.95rem;font-family:'Roboto Mono',monospace}
+.search-bar input{flex:1;min-width:200px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.95rem;font-family:'Roboto Mono',monospace;transition:border-color .2s}
 .search-bar input:focus{outline:none;border-color:var(--blue)}
 .search-bar input::placeholder{color:var(--text-dim)}
 .btn{padding:10px 20px;border:none;border-radius:8px;font-size:.95rem;font-weight:500;cursor:pointer;transition:all .2s;font-family:'Noto Sans TC',sans-serif}
-.btn-primary{background:var(--blue);color:#fff}
-.btn-primary:hover{background:#2563eb}
+.btn-primary{background:var(--blue);color:var(--heading)}
+.btn-primary:hover{background:var(--blue-hover)}
 .btn-primary:disabled{opacity:.5;cursor:not-allowed}
+
+/* 輸入欄位群組（進場日期／買入價／張數）：桌面同列對齊，手機一律上下堆疊，標籤與輸入框寬度一致 */
+.field-group{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.field-item{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:.85rem;color:var(--text-dim)}
+.field-item label{flex:0 0 auto}
+.field-input{background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:.9rem;font-family:'Roboto Mono',monospace;transition:border-color .2s;width:140px}
+.field-input:focus{outline:none;border-color:var(--blue)}
+@media(max-width:640px){
+  .field-item{flex-direction:column;align-items:stretch;gap:6px}
+  .field-input{width:100%}
+}
 
 /* Grid */
 .container{max-width:1400px;margin:0 auto;padding:20px 24px}
@@ -45,8 +58,8 @@ a:hover{text-decoration:underline}
 @media(max-width:768px){.grid{grid-template-columns:1fr}}
 
 /* Card */
-.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;overflow:hidden}
-.card-title{font-size:1rem;font-weight:700;color:#fff;margin-bottom:12px;display:flex;align-items:center;gap:8px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.card-title{font-size:1rem;font-weight:700;color:var(--heading);margin-bottom:12px;display:flex;align-items:center;gap:8px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 .card-title .icon{font-size:1.2rem}
 .card-body{font-size:.9rem;line-height:1.6}
 
@@ -58,11 +71,11 @@ a:hover{text-decoration:underline}
 /* Table */
 table{width:100%;border-collapse:collapse;font-size:.85rem}
 th{text-align:left;padding:6px 8px;color:var(--text-dim);font-weight:500;border-bottom:1px solid var(--border)}
-td{padding:6px 8px;border-bottom:1px solid rgba(45,55,72,.4)}
+td{padding:6px 8px;border-bottom:1px solid rgba(60,65,80,.45)}
 tr:last-child td{border-bottom:none}
 
 /* Indicators */
-.indicator-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(45,55,72,.3)}
+.indicator-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(60,65,80,.35)}
 .indicator-row:last-child{border-bottom:none}
 .ind-label{color:var(--text-dim);font-size:.85rem}
 .ind-value{font-family:'Roboto Mono',monospace;font-weight:500}
@@ -72,10 +85,10 @@ tr:last-child td{border-bottom:none}
 .score-badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:.8rem;font-weight:700;font-family:'Roboto Mono',monospace}
 .score-pos{background:var(--red-bg);color:var(--red)}
 .score-neg{background:var(--green-bg);color:var(--green)}
-.score-neu{background:rgba(234,179,8,.12);color:var(--yellow)}
+.score-neu{background:var(--yellow-bg);color:var(--yellow)}
 
 /* Verdict */
-.verdict-box{background:var(--card2);border:2px solid var(--border);border-radius:12px;padding:20px;text-align:center;margin-bottom:16px}
+.verdict-box{background:var(--card2);border:2px solid var(--border);border-radius:12px;padding:20px;text-align:center;margin-bottom:16px;box-shadow:0 2px 10px rgba(0,0,0,.2)}
 .verdict-label{font-size:1.8rem;font-weight:700;font-family:'Noto Serif TC',serif}
 .verdict-buy{color:var(--green);border-color:var(--green)}
 .verdict-watch{color:var(--yellow);border-color:var(--yellow)}
@@ -92,14 +105,14 @@ tr:last-child td{border-bottom:none}
 .reasons li::marker{color:var(--blue)}
 
 /* News */
-.news-item{padding:10px 0;border-bottom:1px solid rgba(45,55,72,.4)}
+.news-item{padding:10px 0;border-bottom:1px solid rgba(60,65,80,.45)}
 .news-item:last-child{border-bottom:none}
 .news-title{font-size:.9rem;font-weight:500;margin-bottom:4px}
 .news-meta{font-size:.78rem;color:var(--text-dim);display:flex;gap:8px;align-items:center}
 .news-tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.72rem;font-weight:700}
 .tag-pos{background:var(--red-bg);color:var(--red)}
 .tag-neg{background:var(--green-bg);color:var(--green)}
-.tag-neu{background:rgba(148,163,184,.12);color:var(--text-dim)}
+.tag-neu{background:rgba(139,145,161,.14);color:var(--text-dim)}
 
 /* Sector flow */
 .sector-item{display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-radius:6px;margin-bottom:4px;font-size:.85rem}
@@ -109,7 +122,7 @@ tr:last-child td{border-bottom:none}
 .sector-val{font-family:'Roboto Mono',monospace;font-weight:700}
 
 /* US market */
-.us-item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(45,55,72,.4)}
+.us-item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(60,65,80,.45)}
 .us-item:last-child{border-bottom:none}
 .us-name{font-size:.9rem;color:var(--text-dim)}
 .us-close{font-family:'Roboto Mono',monospace;font-weight:500}
@@ -133,17 +146,19 @@ tr:last-child td{border-bottom:none}
     <input type="text" id="stockInput" placeholder="輸入股票代號（如 2308）或名稱..." onkeypress="if(event.key==='Enter')doSearch()">
     <button class="btn btn-primary" id="searchBtn" onclick="doSearch()">健診</button>
   </div>
-  <div style="margin-top:8px;font-size:.85rem;color:var(--text-dim);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-    <label for="entryDateInput">我的進場日期（選填，用於精確停損／停利判定）：</label>
-    <input type="date" id="entryDateInput" style="background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
-  </div>
-  <div style="margin-top:8px;font-size:.85rem;color:var(--text-dim);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-    <label for="buyPriceInput">我的買入價（選填，不存檔，僅供本次分析）：</label>
-    <input type="number" step="0.01" id="buyPriceInput" placeholder="例如 1050" style="width:100px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
-    <label for="sharesInput">張數（可小數，零股如100股請填0.1）：</label>
-    <input type="number" step="0.001" id="sharesInput" placeholder="例如 1 或 0.1" style="width:110px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
-    <label><input type="radio" name="strategyPref" value="short" checked> 短線</label>
-    <label><input type="radio" name="strategyPref" value="mid"> 波段</label>
+  <div class="field-group">
+    <div class="field-item">
+      <label for="entryDateInput">我的進場日期（選填，用於精確停損／停利判定）：</label>
+      <input type="date" id="entryDateInput" class="field-input">
+    </div>
+    <div class="field-item">
+      <label for="buyPriceInput">我的買入價（選填，不存檔，僅供本次分析）：</label>
+      <input type="number" step="0.01" id="buyPriceInput" placeholder="例如 1050" class="field-input">
+    </div>
+    <div class="field-item">
+      <label for="sharesInput">張數（可小數，零股如100股請填0.1）：</label>
+      <input type="number" step="0.001" id="sharesInput" placeholder="例如 1 或 0.1" class="field-input">
+    </div>
   </div>
 </div>
 
@@ -442,15 +457,7 @@ function fetchTechData() {
     url += '&buy_price=' + encodeURIComponent(buyPrice);
     var shares = document.getElementById('sharesInput').value;
     if (shares) url += '&shares=' + encodeURIComponent(shares);
-    // 改用 getElementsByName 而非 querySelector([name=...]:checked)，
-    // 避免部分 Safari 版本對屬性選擇器語法過於嚴格而拋出
-    // "The string did not match the expected pattern" 錯誤
-    var radios = document.getElementsByName('strategyPref');
-    var strategyPref = 'short';
-    for (var ri = 0; ri < radios.length; ri++) {
-      if (radios[ri].checked) { strategyPref = radios[ri].value; break; }
-    }
-    url += '&strategy_pref=' + encodeURIComponent(strategyPref);
+    url += '&strategy_pref=short';
   }
   return fetch(url)
     .then(function(r){ return r.json(); })
