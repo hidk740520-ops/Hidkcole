@@ -2482,7 +2482,7 @@ def ai_analyze():
 
     try:
         from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1"})
+        client = genai.Client(api_key=GEMINI_API_KEY)
         interaction = client.interactions.create(
             model=GEMINI_MODEL,
             input=prompt,
@@ -2504,7 +2504,8 @@ def ai_analyze():
     except Exception as e:
         # 不把 API key 或完整 prompt 回傳前端。
         msg = str(e).replace(GEMINI_API_KEY, "***") if GEMINI_API_KEY else str(e)
-        return jsonify({"status": 502, "msg": "Gemini 分析失敗：" + msg[:300]}), 502
+        print("[Gemini AI error]", type(e).__name__, msg[:1000], flush=True)
+        return jsonify({"status": 502, "msg": "Gemini 分析失敗：" + msg[:500]}), 502
 
 # ===========================================================================
 # Main
