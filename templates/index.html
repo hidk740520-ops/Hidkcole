@@ -1293,7 +1293,11 @@ function runGeminiAnalysis() {
   };
   fetch('/api/ai/analyze', {
     method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
-  }).then(function(r){ return r.json(); }).then(function(j){
+  }).then(async function(r){
+    var text = await r.text();
+    try { return JSON.parse(text); }
+    catch (e) { throw new Error('伺服器回應異常（HTTP ' + r.status + '）：' + text.slice(0,180)); }
+  }).then(function(j){
     btn.disabled = false; btn.textContent = '✨ 重新執行 Gemini AI 解讀';
     if (j.status !== 200) {
       st.textContent = 'Gemini 尚未完成';
