@@ -259,9 +259,16 @@ tr:last-child td{border-bottom:none}
 
 <!-- ===== AI 綜合操作建議 ===== -->
 <div class="card" style="margin-top:16px">
-  <div class="card-title"><span class="icon">🤖</span>AI 綜合操作建議</div>
+  <div class="card-title"><span class="icon">📊</span>系統綜合操作建議</div>
   <div class="card-body" id="verdictBody">
     <div class="placeholder">輸入股票代號開始健診</div>
+  </div>
+  <div class="card-body" style="border-top:1px solid var(--border)">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn btn-primary" id="geminiBtn" onclick="runGeminiAnalysis()">✨ Google Gemini AI 輔助解讀</button>
+      <span id="geminiStatus" style="font-size:.82rem;color:var(--text-dim)">AI 不取代系統公式與停損規則</span>
+    </div>
+    <div id="geminiBody"><div class="placeholder">完成個股健診後，可手動啟動 Gemini 深度解讀（不會自動消耗 AI 配額）</div></div>
   </div>
 </div>
 
@@ -488,6 +495,7 @@ function fetchTechData() {
         decision: j.decision || null,
         weeklyKd: j.weekly_kd || null,
         revenueYoy: j.revenue_yoy,
+        revenueData: j.revenue_data || [],
         valuation: j.valuation || null,
         position: j.position || null
       };
@@ -1258,6 +1266,56 @@ function renderVerdict() {
   html += '</ul>';
 
   el.innerHTML = html;
+}
+
+function escapeHtml(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+}
+
+function runGeminiAnalysis() {
+  var btn = document.getElementById('geminiBtn');
+  var el = document.getElementById('geminiBody');
+  var st = document.getElementById('geminiStatus');
+  if (!G.stockId || !G.techData) {
+    el.innerHTML = errHtml('請先輸入股票代號並完成個股健診。');
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = 'Gemini 分析中...';
+  st.textContent = '正在將本次健診結果送往 Gemini 解讀';
+  el.innerHTML = loadingHtml('Google Gemini 正在整理多面向訊號...');
+  var payload = {
+    symbol: G.stockId, name: G.stockName, industry: G.industry,
+    scores: G.scores, techData: G.techData, fundData: G.fundData,
+    chipData: G.chipData, usData: G.usData, newsData: G.newsData
+  };
+  fetch('/api/ai/analyze', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+  }).then(function(r){ return r.json(); }).then(function(j){
+    btn.disabled = false; btn.textContent = '✨ 重新執行 Gemini AI 解讀';
+    if (j.status !== 200) {
+      st.textContent = 'Gemini 尚未完成';
+      el.innerHTML = errHtml(j.msg || 'Gemini 分析失敗'); return;
+    }
+    var a = j.analysis || {};
+    var html = '<div style="background:var(--card2);border-radius:8px;padding:12px">';
+    html += '<div style="font-weight:700;margin-bottom:8px">Gemini 摘要</div><div>' + escapeHtml(a.summary || '') + '</div>';
+    function section(title, arr) {
+      if (!Array.isArray(arr) || !arr.length) return '';
+      var x = '<div style="font-weight:700;margin-top:12px">' + title + '</div><ul class="reasons">';
+      arr.forEach(function(v){ x += '<li>' + escapeHtml(v) + '</li>'; }); return x + '</ul>';
+    }
+    html += section('有利訊號', a.strengths) + section('風險訊號', a.risks) + section('後續觀察', a.watch_points);
+    if (a.data_quality) html += '<div style="font-size:.82rem;color:var(--text-dim);margin-top:10px">資料限制：' + escapeHtml(a.data_quality) + '</div>';
+    html += '</div>';
+    el.innerHTML = html;
+    st.textContent = 'Google Gemini · ' + (j.model || '') + ' · 僅輔助解讀';
+  }).catch(function(err){
+    btn.disabled = false; btn.textContent = '✨ Google Gemini AI 輔助解讀';
+    st.textContent = 'Gemini 連線失敗'; el.innerHTML = errHtml(err.message || '連線失敗');
+  });
 }
 
 function buildReasons(tech, fund, chip, us, total) {
