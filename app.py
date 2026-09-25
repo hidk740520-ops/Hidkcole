@@ -2406,6 +2406,106 @@ def get_top_institutional():
     return jsonify({"status": 200, "cached": False, **result})
 
 
+
+# ===========================================================================
+# V2.5 Google Gemini AI 輔助分析層
+# ---------------------------------------------------------------------------
+# 設計原則：Gemini 只負責「解讀既有引擎結果」，不直接取代技術指標、
+# 價位、停損、回測或交易成本公式，避免生成式 AI 改寫確定性計算。
+# 金鑰只從伺服器環境變數讀取，不送到瀏覽器。
+# ===========================================================================
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+
+AI_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string", "description": "80到160字的繁體中文客觀摘要"},
+        "strengths": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+        "risks": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+        "watch_points": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+        "data_quality": {"type": "string", "description": "指出資料不足、矛盾或時效性限制"}
+    },
+    "required": ["summary", "strengths", "risks", "watch_points", "data_quality"],
+    "additionalProperties": False
+}
+
+def _compact_ai_payload(payload):
+    """只保留 Gemini 解讀需要的欄位，降低 token 與敏感/無關資料外送。"""
+    if not isinstance(payload, dict):
+        return {}
+    allowed = ["symbol", "name", "industry", "scores", "techData", "fundData",
+               "chipData", "usData", "newsData"]
+    clean = {k: payload.get(k) for k in allowed if k in payload}
+    # 新聞只送前 6 筆，且只保留標題/來源/時間，不送 URL。
+    news = clean.get("newsData")
+    if isinstance(news, dict):
+        news = news.get("data") or news.get("news") or []
+    if isinstance(news, list):
+        clean["newsData"] = [
+            {k: n.get(k) for k in ("title", "source", "pubDate") if k in n}
+            for n in news[:6] if isinstance(n, dict)
+        ]
+    else:
+        clean["newsData"] = []
+    return clean
+
+@app.route("/api/ai/status")
+def ai_status():
+    return jsonify({
+        "status": 200,
+        "enabled": bool(GEMINI_API_KEY),
+        "provider": "Google Gemini",
+        "model": GEMINI_MODEL if GEMINI_API_KEY else None,
+        "mode": "advisory_only",
+    })
+
+@app.route("/api/ai/analyze", methods=["POST"])
+def ai_analyze():
+    if not GEMINI_API_KEY:
+        return jsonify({
+            "status": 503,
+            "msg": "尚未設定 GEMINI_API_KEY。請先在部署平台的 Environment Variables 加入 Gemini API 金鑰。"
+        }), 503
+
+    payload = _compact_ai_payload(request.get_json(silent=True) or {})
+    if not payload.get("symbol"):
+        return jsonify({"status": 400, "msg": "缺少股票代號，請先執行個股健診。"}), 400
+
+    system_note = (
+        "你是台股分析系統的輔助解讀層。只能根據提供的系統資料做客觀整理，"
+        "不可捏造即時價格、財報、新聞或法人數據；不可覆寫系統已計算的價位、停損與評分。"
+        "請使用繁體中文（台灣用語）。清楚區分已知資料與不確定性。"
+        "不要承諾報酬，也不要把輸出描述為保證獲利或自動交易指令。"
+    )
+    prompt = system_note + "\n\n以下為系統目前的個股健診資料：\n" + json.dumps(payload, ensure_ascii=False, default=str)
+
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1"})
+        interaction = client.interactions.create(
+            model=GEMINI_MODEL,
+            input=prompt,
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": AI_RESPONSE_SCHEMA,
+            },
+        )
+        raw = interaction.output_text or "{}"
+        result = json.loads(raw)
+        return jsonify({
+            "status": 200,
+            "provider": "Google Gemini",
+            "model": GEMINI_MODEL,
+            "analysis": result,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+        })
+    except Exception as e:
+        # 不把 API key 或完整 prompt 回傳前端。
+        msg = str(e).replace(GEMINI_API_KEY, "***") if GEMINI_API_KEY else str(e)
+        return jsonify({"status": 502, "msg": "Gemini 分析失敗：" + msg[:300]}), 502
+
 # ===========================================================================
 # Main
 # ===========================================================================
