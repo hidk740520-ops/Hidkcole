@@ -2408,47 +2408,72 @@ def get_top_institutional():
 
 
 # ===========================================================================
-# V2.5 Google Gemini AI 輔助分析層
+# V2.5.2 Google Gemini AI 輔助分析層（Render Free 記憶體優化）
 # ---------------------------------------------------------------------------
-# 設計原則：Gemini 只負責「解讀既有引擎結果」，不直接取代技術指標、
-# 價位、停損、回測或交易成本公式，避免生成式 AI 改寫確定性計算。
-# 金鑰只從伺服器環境變數讀取，不送到瀏覽器。
+# 不載入 google-genai SDK，直接使用既有 requests 呼叫 Gemini REST API，
+# 避免 Free instance 在 request 時載入大型 SDK/相依套件造成 worker OOM。
+# Gemini 只解讀既有引擎結果，不覆寫價位、停損、評分或回測公式。
 # ===========================================================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
 
-AI_RESPONSE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string", "description": "80到160字的繁體中文客觀摘要"},
-        "strengths": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
-        "risks": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
-        "watch_points": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
-        "data_quality": {"type": "string", "description": "指出資料不足、矛盾或時效性限制"}
-    },
-    "required": ["summary", "strengths", "risks", "watch_points", "data_quality"],
-    "additionalProperties": False
-}
+
+def _trim_ai_value(value, depth=0):
+    """限制送往 AI 的資料大小；只保留摘要需要的純量/少量欄位。"""
+    if depth > 3:
+        return None
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:500]
+    if isinstance(value, list):
+        return [_trim_ai_value(v, depth + 1) for v in value[:8]]
+    if isinstance(value, dict):
+        out = {}
+        for i, (k, v) in enumerate(value.items()):
+            if i >= 24:
+                break
+            tv = _trim_ai_value(v, depth + 1)
+            if tv is not None:
+                out[str(k)[:80]] = tv
+        return out
+    return str(value)[:300]
+
 
 def _compact_ai_payload(payload):
-    """只保留 Gemini 解讀需要的欄位，降低 token 與敏感/無關資料外送。"""
     if not isinstance(payload, dict):
         return {}
     allowed = ["symbol", "name", "industry", "scores", "techData", "fundData",
                "chipData", "usData", "newsData"]
-    clean = {k: payload.get(k) for k in allowed if k in payload}
-    # 新聞只送前 6 筆，且只保留標題/來源/時間，不送 URL。
-    news = clean.get("newsData")
+    clean = {k: _trim_ai_value(payload.get(k)) for k in allowed if k in payload}
+    news = payload.get("newsData")
     if isinstance(news, dict):
         news = news.get("data") or news.get("news") or []
     if isinstance(news, list):
         clean["newsData"] = [
-            {k: n.get(k) for k in ("title", "source", "pubDate") if k in n}
-            for n in news[:6] if isinstance(n, dict)
+            {k: str(n.get(k, ""))[:220] for k in ("title", "source", "pubDate") if n.get(k)}
+            for n in news[:4] if isinstance(n, dict)
         ]
-    else:
-        clean["newsData"] = []
     return clean
+
+
+def _extract_json_object(text):
+    text = (text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        a, b = text.find("{"), text.rfind("}")
+        if a >= 0 and b > a:
+            return json.loads(text[a:b+1])
+        raise ValueError("Gemini 回傳內容不是有效 JSON")
+
 
 @app.route("/api/ai/status")
 def ai_status():
@@ -2457,43 +2482,59 @@ def ai_status():
         "enabled": bool(GEMINI_API_KEY),
         "provider": "Google Gemini",
         "model": GEMINI_MODEL if GEMINI_API_KEY else None,
-        "mode": "advisory_only",
+        "mode": "advisory_only_rest_low_memory",
     })
+
 
 @app.route("/api/ai/analyze", methods=["POST"])
 def ai_analyze():
     if not GEMINI_API_KEY:
-        return jsonify({
-            "status": 503,
-            "msg": "尚未設定 GEMINI_API_KEY。請先在部署平台的 Environment Variables 加入 Gemini API 金鑰。"
-        }), 503
+        return jsonify({"status": 503, "msg": "尚未設定 GEMINI_API_KEY。"}), 503
 
     payload = _compact_ai_payload(request.get_json(silent=True) or {})
     if not payload.get("symbol"):
         return jsonify({"status": 400, "msg": "缺少股票代號，請先執行個股健診。"}), 400
 
-    system_note = (
-        "你是台股分析系統的輔助解讀層。只能根據提供的系統資料做客觀整理，"
-        "不可捏造即時價格、財報、新聞或法人數據；不可覆寫系統已計算的價位、停損與評分。"
-        "請使用繁體中文（台灣用語）。清楚區分已知資料與不確定性。"
-        "不要承諾報酬，也不要把輸出描述為保證獲利或自動交易指令。"
+    instruction = (
+        "你是台股分析系統的輔助解讀層。只能根據提供資料客觀整理，不可捏造資料，"
+        "不可覆寫系統計算的價位、停損、評分或回測。使用繁體中文（台灣用語）。"
+        "請只回傳一個 JSON 物件，不要 Markdown。欄位固定為："
+        "summary(80到160字字串)、strengths(最多4項字串陣列)、risks(最多4項)、"
+        "watch_points(最多4項)、data_quality(字串)。不要承諾報酬。"
     )
-    prompt = system_note + "\n\n以下為系統目前的個股健診資料：\n" + json.dumps(payload, ensure_ascii=False, default=str)
+    prompt = instruction + "\n資料：" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    # 最後一道大小保護，避免異常 payload 造成大量 token/記憶體。
+    prompt = prompt[:18000]
 
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 900,
+        },
+    }
     try:
-        from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        interaction = client.interactions.create(
-            model=GEMINI_MODEL,
-            input=prompt,
-            response_format={
-                "type": "text",
-                "mime_type": "application/json",
-                "schema": AI_RESPONSE_SCHEMA,
-            },
+        # requests 已是本專案既有相依，不再載入 google-genai SDK。
+        resp = requests.post(
+            url,
+            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+            json=body,
+            timeout=(8, 45),
         )
-        raw = interaction.output_text or "{}"
-        result = json.loads(raw)
+        if resp.status_code != 200:
+            detail = resp.text[:700]
+            print(f"[Gemini REST error] HTTP {resp.status_code} {detail}", flush=True)
+            return jsonify({"status": 502, "msg": f"Gemini API HTTP {resp.status_code}：{detail[:350]}"}), 502
+
+        data = resp.json()
+        candidates = data.get("candidates") or []
+        parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
+        raw = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip()
+        if not raw:
+            reason = (candidates[0].get("finishReason") if candidates else None) or "無回傳文字"
+            return jsonify({"status": 502, "msg": f"Gemini 未產生分析內容：{reason}"}), 502
+        result = _extract_json_object(raw)
         return jsonify({
             "status": 200,
             "provider": "Google Gemini",
@@ -2501,11 +2542,12 @@ def ai_analyze():
             "analysis": result,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
         })
+    except requests.Timeout:
+        return jsonify({"status": 504, "msg": "Gemini 回應逾時，請稍後再試。"}), 504
     except Exception as e:
-        # 不把 API key 或完整 prompt 回傳前端。
         msg = str(e).replace(GEMINI_API_KEY, "***") if GEMINI_API_KEY else str(e)
-        print("[Gemini AI error]", type(e).__name__, msg[:1000], flush=True)
-        return jsonify({"status": 502, "msg": "Gemini 分析失敗：" + msg[:500]}), 502
+        print("[Gemini REST exception]", type(e).__name__, msg[:800], flush=True)
+        return jsonify({"status": 502, "msg": "Gemini 分析失敗：" + msg[:350]}), 502
 
 # ===========================================================================
 # Main

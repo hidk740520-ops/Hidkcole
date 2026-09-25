@@ -3,4 +3,3 @@ requests
 pandas
 yfinance
 gunicorn
-google-genai>=1.0.0
