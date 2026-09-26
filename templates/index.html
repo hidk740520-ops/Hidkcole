@@ -497,6 +497,7 @@ function fetchTechData() {
         revenueYoy: j.revenue_yoy,
         revenueData: j.revenue_data || [],
         valuation: j.valuation || null,
+        financial: j.financial || null,
         position: j.position || null
       };
     });
@@ -513,8 +514,8 @@ function fetchFundData() {
   var ed = end.toISOString().slice(0,10);
   var p = fetchFinMind('TaiwanStockStockDividend', G.stockId, sd, ed);
   return p.then(function(j){
-    G.fundData = { revenue: revenue, dividend: j.data || [] };
-  }).catch(function(){ G.fundData = { revenue: revenue, dividend: [] }; });
+    G.fundData = { revenue: revenue, dividend: j.data || [], financial: (G.techData && G.techData.financial) || null };
+  }).catch(function(){ G.fundData = { revenue: revenue, dividend: [], financial: (G.techData && G.techData.financial) || null }; });
 }
 
 // --- 籌碼面：法人買賣超、融資 ---
@@ -880,7 +881,7 @@ function renderTech() {
 function renderFund() {
   var el = document.getElementById('fundBody');
   var d = G.fundData;
-  if (!d || (!d.revenue.length && !d.dividend.length)) {
+  if (!d || (!d.revenue.length && !d.dividend.length && !(d.financial && d.financial.available) && !(G.techData && G.techData.valuation))) {
     el.innerHTML = '<div class="placeholder">無基本面資料</div>';
     return;
   }
@@ -930,6 +931,24 @@ function renderFund() {
       score += mom > 0 ? 1 : -1;
       scoreMax += 1;
     }
+    html += '</table>';
+  }
+
+  // V2.5.4 財報 EPS / 獲利能力
+  if (d.financial && d.financial.available) {
+    var f = d.financial;
+    html += '<table style="margin-top:8px">';
+    html += '<tr><th>最新財報日期</th><td class="mono">' + (f.date || '--') + '</td></tr>';
+    if (f.eps !== null && f.eps !== undefined) {
+      html += '<tr><th>財報 EPS</th><td class="mono ' + (f.eps > 0 ? 'pos' : 'neg') + '">' + fmt(f.eps,2) + ' 元</td></tr>';
+      score += f.eps > 0 ? 1 : -1; scoreMax += 1;
+    }
+    if (f.eps_yoy !== null && f.eps_yoy !== undefined) {
+      html += '<tr><th>EPS 同期變化</th><td class="mono ' + (f.eps_yoy > 0 ? 'pos' : 'neg') + '">' + (f.eps_yoy > 0 ? '+' : '') + fmt(f.eps_yoy,1) + '%</td></tr>';
+      score += f.eps_yoy > 0 ? 1 : -1; scoreMax += 1;
+    }
+    if (f.gross_margin !== null && f.gross_margin !== undefined) html += '<tr><th>毛利率</th><td class="mono">' + fmt(f.gross_margin,1) + '%</td></tr>';
+    if (f.net_margin !== null && f.net_margin !== undefined) html += '<tr><th>淨利率</th><td class="mono">' + fmt(f.net_margin,1) + '%</td></tr>';
     html += '</table>';
   }
 
