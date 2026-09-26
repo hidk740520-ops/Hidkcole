@@ -506,6 +506,97 @@ def fetch_revenue_yoy(stock_id):
     return result
 
 
+# V2.5.4 基本面財報快取：季財報一天內不需重抓
+_financial_cache = {}
+_FINANCIAL_CACHE_TTL = 86400
+
+def fetch_financial_summary(stock_id):
+    """
+    取得 FinMind TaiwanStockFinancialStatements 最近約 2 年資料，
+    整理最新 EPS、稅後淨利、營業收入、毛利率、淨利率與同季 EPS 年增率。
+    保留原始揭露口徑，不把累計 EPS 誤稱為單季 EPS。
+    """
+    now_ts = time.time()
+    cached = _financial_cache.get(stock_id)
+    if cached and now_ts - cached[0] < _FINANCIAL_CACHE_TTL:
+        return cached[1]
+    try:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=900)).strftime("%Y-%m-%d")
+        rows, err = finmind_get({
+            "dataset": "TaiwanStockFinancialStatements",
+            "data_id": stock_id,
+            "start_date": start_date,
+            "end_date": end_date,
+        }, timeout=20)
+        if not rows:
+            result = {"available": False, "message": err or "查無近期財報資料"}
+            _financial_cache[stock_id] = (now_ts, result)
+            return result
+
+        by_date = {}
+        for r in rows:
+            d = str(r.get("date") or "")
+            typ = str(r.get("type") or "")
+            if not d or not typ:
+                continue
+            try:
+                val = float(r.get("value"))
+            except (TypeError, ValueError):
+                continue
+            by_date.setdefault(d, {})[typ] = val
+        dates = sorted(by_date)
+        if not dates:
+            result = {"available": False, "message": "財報格式無有效日期"}
+            _financial_cache[stock_id] = (now_ts, result)
+            return result
+
+        latest_date = dates[-1]
+        latest = by_date[latest_date]
+        eps = latest.get("EPS")
+        income = latest.get("IncomeAfterTaxes")
+        gross = latest.get("GrossProfit")
+        # FinMind 不同產業/時期可能使用 Revenue 或 Income 作為收入欄位
+        revenue = latest.get("Revenue")
+        if revenue is None:
+            revenue = latest.get("OperatingRevenue")
+        if revenue is None:
+            revenue = latest.get("Income")
+
+        eps_yoy = None
+        try:
+            dt = datetime.strptime(latest_date[:10], "%Y-%m-%d")
+            target_year, target_month = dt.year - 1, dt.month
+            prior = None
+            for d in reversed(dates[:-1]):
+                dd = datetime.strptime(d[:10], "%Y-%m-%d")
+                if dd.year == target_year and dd.month == target_month and by_date[d].get("EPS") is not None:
+                    prior = by_date[d].get("EPS")
+                    break
+            if prior not in (None, 0) and eps is not None:
+                eps_yoy = (eps - prior) / abs(prior) * 100
+        except Exception:
+            pass
+
+        gross_margin = (gross / revenue * 100) if gross is not None and revenue not in (None, 0) else None
+        net_margin = (income / revenue * 100) if income is not None and revenue not in (None, 0) else None
+        result = {
+            "available": True,
+            "date": latest_date,
+            "eps": round(eps, 2) if eps is not None else None,
+            "eps_yoy": round(eps_yoy, 2) if eps_yoy is not None else None,
+            "income_after_tax": round(income) if income is not None else None,
+            "statement_revenue": round(revenue) if revenue is not None else None,
+            "gross_margin": round(gross_margin, 2) if gross_margin is not None else None,
+            "net_margin": round(net_margin, 2) if net_margin is not None else None,
+            "source": "FinMind TaiwanStockFinancialStatements",
+        }
+    except Exception as e:
+        result = {"available": False, "message": "財報讀取失敗：" + str(e)[:120]}
+    _financial_cache[stock_id] = (now_ts, result)
+    return result
+
+
 
 # ===========================================================================
 # 大盤環境引擎：以台灣加權指數 001 為基準，所有判斷只使用訊號日前已知資料
@@ -1910,6 +2001,12 @@ def get_stock_data():
     except Exception:
         valuation = None
 
+    # --- V2.5.4 基本面財報：EPS / 獲利能力 ---
+    try:
+        financial = fetch_financial_summary(stock_id)
+    except Exception:
+        financial = {"available": False, "message": "財報資料暫時無法取得"}
+
     # --- V2.1 價格決策引擎（支撐/壓力聚集、核心買賣點±1%、禁止交易、補倉、動態停損停利、信心度）---
     strategy_pref = request.args.get("strategy_pref", "short").strip()
     if strategy_pref not in ("short", "mid"):
@@ -2053,6 +2150,7 @@ def get_stock_data():
         "revenue_yoy": revenue_yoy,
         "revenue_data": (_revenue_raw_cache.get(stock_id, (0, []))[1] if stock_id in _revenue_raw_cache else []),
         "valuation": valuation,
+        "financial": financial,
         "decision": decision,
         "position": position,
     }
@@ -2408,7 +2506,7 @@ def get_top_institutional():
 
 
 # ===========================================================================
-# V2.5.2 Google Gemini AI 輔助分析層（Render Free 記憶體優化）
+# V2.5.4 Google Gemini AI 輔助分析層（Render Free 記憶體優化）
 # ---------------------------------------------------------------------------
 # 不載入 google-genai SDK，直接使用既有 requests 呼叫 Gemini REST API，
 # 避免 Free instance 在 request 時載入大型 SDK/相依套件造成 worker OOM。
