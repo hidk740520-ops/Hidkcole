@@ -2416,6 +2416,7 @@ def get_top_institutional():
 # ===========================================================================
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite").strip()
 
 
 def _trim_ai_value(value, depth=0):
@@ -2503,47 +2504,86 @@ def ai_analyze():
         "watch_points(最多4項)、data_quality(字串)。不要承諾報酬。"
     )
     prompt = instruction + "\n資料：" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-    # 最後一道大小保護，避免異常 payload 造成大量 token/記憶體。
-    prompt = prompt[:18000]
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    prompt = prompt[:16000]
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "maxOutputTokens": 900,
+            "maxOutputTokens": 700,
+            "temperature": 0.2,
         },
     }
-    try:
-        # requests 已是本專案既有相依，不再載入 google-genai SDK。
-        resp = requests.post(
-            url,
-            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-            json=body,
-            timeout=(8, 45),
-        )
-        if resp.status_code != 200:
-            detail = resp.text[:700]
-            print(f"[Gemini REST error] HTTP {resp.status_code} {detail}", flush=True)
-            return jsonify({"status": 502, "msg": f"Gemini API HTTP {resp.status_code}：{detail[:350]}"}), 502
 
-        data = resp.json()
-        candidates = data.get("candidates") or []
-        parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
-        raw = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip()
-        if not raw:
-            reason = (candidates[0].get("finishReason") if candidates else None) or "無回傳文字"
-            return jsonify({"status": 502, "msg": f"Gemini 未產生分析內容：{reason}"}), 502
-        result = _extract_json_object(raw)
-        return jsonify({
-            "status": 200,
-            "provider": "Google Gemini",
-            "model": GEMINI_MODEL,
-            "analysis": result,
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-        })
-    except requests.Timeout:
-        return jsonify({"status": 504, "msg": "Gemini 回應逾時，請稍後再試。"}), 504
+    # V2.5.3：先用 3.8 Flash；暫時性壅塞時短暫重試，再自動切換 Flash-Lite。
+    # 避免長時間 exponential backoff 卡住 Render Free worker。
+    model_plan = [(GEMINI_MODEL, 2)]
+    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
+        model_plan.append((GEMINI_FALLBACK_MODEL, 2))
+    transient_codes = {408, 429, 500, 502, 503, 504}
+    last_code, last_detail = None, ""
+
+    try:
+        for model_index, (model, attempts) in enumerate(model_plan):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            for attempt in range(attempts):
+                try:
+                    resp = requests.post(
+                        url,
+                        headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+                        json=body,
+                        timeout=(6, 32),
+                    )
+                except requests.Timeout:
+                    last_code, last_detail = 504, "Gemini 回應逾時"
+                    if attempt + 1 < attempts:
+                        time.sleep(1.2 * (2 ** attempt))
+                        continue
+                    break
+
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates") or []
+                    parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
+                    raw = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip()
+                    if not raw:
+                        reason = (candidates[0].get("finishReason") if candidates else None) or "無回傳文字"
+                        last_code, last_detail = 502, f"Gemini 未產生分析內容：{reason}"
+                        break
+                    result = _extract_json_object(raw)
+                    return jsonify({
+                        "status": 200,
+                        "provider": "Google Gemini",
+                        "model": model,
+                        "fallback_used": model != GEMINI_MODEL,
+                        "analysis": result,
+                        "generated_at": datetime.now().isoformat(timespec="seconds"),
+                    })
+
+                last_code = resp.status_code
+                last_detail = resp.text[:700]
+                print(f"[Gemini REST error] model={model} attempt={attempt+1} HTTP {last_code} {last_detail}", flush=True)
+
+                if last_code not in transient_codes:
+                    # 400/401/403 等設定錯誤不應重試或切模型。
+                    safe_detail = last_detail.replace(GEMINI_API_KEY, "***")
+                    return jsonify({"status": 502, "msg": f"Gemini API HTTP {last_code}：{safe_detail[:350]}"}), 502
+
+                if attempt + 1 < attempts:
+                    # 短版 exponential backoff，兼顧 Render Free 的 request 時間。
+                    time.sleep(1.2 * (2 ** attempt))
+
+            if model_index + 1 < len(model_plan):
+                print(f"[Gemini fallback] {model} unavailable -> {model_plan[model_index+1][0]}", flush=True)
+
+        # 主模型與備援模型都遇到暫時性錯誤時，回傳友善訊息而非整段 Google JSON。
+        if last_code in transient_codes:
+            return jsonify({
+                "status": 503,
+                "msg": "Gemini 目前服務繁忙，系統已自動重試並切換備援模型，但仍暫時無法完成。請稍後再按一次。",
+                "upstream_status": last_code,
+            }), 503
+        return jsonify({"status": 502, "msg": "Gemini 暫時無法完成分析。"}), 502
+
     except Exception as e:
         msg = str(e).replace(GEMINI_API_KEY, "***") if GEMINI_API_KEY else str(e)
         print("[Gemini REST exception]", type(e).__name__, msg[:800], flush=True)
