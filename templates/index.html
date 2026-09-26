@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>台股個股健診升級版</title>
+<title>台股個股健診 V2.6.0 決策引擎版</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -139,7 +139,7 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== HEADER ===================== -->
 <div class="header">
   <div class="header-top">
-    <h1>📊 台股個股健診升級版</h1>
+    <h1>📊 台股個股健診 V2.6.0</h1>
     <div class="report-time" id="reportTime"></div>
   </div>
   <div class="search-bar">
@@ -299,7 +299,7 @@ tr:last-child td{border-bottom:none}
 var G = {
   stockId: '',
   stockName: '',
-  industry: '',
+  industry: '', market: '', tomorrowScenario: null,
   prices: [],        // [{date, open, max, min, close, Trading_Volume}, ...]
   scores: { tech:0, fund:0, chip:0, us:0, total:0 },
   techData: null,
@@ -370,7 +370,7 @@ function doSearch() {
 
   // 重設
   G = {
-    stockId: '', stockName: '', industry: '',
+    stockId: '', stockName: '', industry: '', market: '', tomorrowScenario: null,
     prices: [], scores: { tech:0, fund:0, chip:0, us:0, total:0 },
     techData: null, fundData: null, chipData: null,
     usData: null, newsData: null, sectorData: null,
@@ -435,6 +435,8 @@ function doSearch() {
     var infoHtml = '<span class="stock-id">' + G.stockId + '</span>';
     if (G.stockName) infoHtml += '<span class="stock-name">' + G.stockName + '</span>';
     if (G.industry) infoHtml += '<span style="color:var(--text-dim);font-size:.9rem">｜' + G.industry + '</span>';
+    if (G.market) infoHtml += '<span style="color:var(--text-dim);font-size:.82rem">｜' + G.market + '</span>';
+    if (!G.stockName) infoHtml += '<span style="color:var(--yellow);font-size:.82rem">｜⚠ 名稱待確認</span>';
     document.querySelector('.header-top').insertAdjacentHTML('afterbegin',
       '<div class="stock-info" id="stockInfo">' + infoHtml + '</div>');
     renderAll();
@@ -475,6 +477,7 @@ function fetchTechData() {
       // 如果後端有回傳 name/industry，補填
       if (j.name && !G.stockName) G.stockName = j.name;
       if (j.industry && !G.industry) G.industry = j.industry;
+      if (j.market) G.market = j.market;
       // 映射後端回傳格式 → 前端 G.techData 結構
       G.techData = {
         lastClose: j.close,
@@ -569,9 +572,65 @@ function fetchNews() {
 // ===========================================================================
 
 // ===========================================================================
+// V2.6.0 隔日開盤情境引擎
+// 不是預測保證：以最新收盤、個股技術/量價與最近可得美股收盤建立條件式情境。
+// ===========================================================================
+function buildTomorrowScenario() {
+  if (!G.techData) return null;
+  var t = G.techData, us = (G.usData && G.usData.data) ? G.usData.data : [];
+  var weights = {'^SOX':0.40,'^IXIC':0.30,'^GSPC':0.20,'^DJI':0.10};
+  var usScore = 0, wsum = 0, parts = [];
+  us.forEach(function(x){
+    var w = weights[x.symbol] || 0;
+    if (w && x.change_pct !== null && x.change_pct !== undefined) {
+      usScore += Math.max(-3, Math.min(3, Number(x.change_pct))) * w; wsum += w;
+      parts.push((x.name||x.symbol) + ' ' + (Number(x.change_pct)>=0?'+':'') + fmt(Number(x.change_pct),2) + '%');
+    }
+  });
+  if (wsum) usScore /= wsum;
+  var tech = 0;
+  if (t.lastClose > t.ma20) tech += 0.6; else tech -= 0.6;
+  if (t.ma20 > t.ma60) tech += 0.5; else tech -= 0.5;
+  if (t.macd && t.macd.hist > 0) tech += 0.35; else tech -= 0.35;
+  if (t.kd && t.kd.k > t.kd.d) tech += 0.25; else tech -= 0.25;
+  var vr = t.vol && t.vol.ratio ? Number(t.vol.ratio) : 1;
+  if (vr < 0.7) tech *= 0.75;
+  var combined = usScore * 0.55 + tech * 0.45;
+  var bias = combined >= 0.55 ? '偏多' : (combined <= -0.55 ? '偏空' : '中性');
+  var confidence = Math.min(80, Math.round(45 + Math.abs(combined)*18));
+  if (!us.length) confidence = Math.min(confidence, 45);
+  var c = Number(t.lastClose), atrProxy = Math.max(c*0.008, Math.abs((t.bb&&t.bb.upper||c)-(t.bb&&t.bb.lower||c))/4 || c*0.012);
+  var gap = Math.max(c*0.003, atrProxy*0.28);
+  return {
+    base_close:c, date:t.lastDate, bias:bias, confidence:confidence,
+    us_score:Number(usScore.toFixed(3)), tech_score:Number(tech.toFixed(3)), us_parts:parts,
+    open_high: Number((c+gap).toFixed(2)), open_low:Number((c-gap).toFixed(2)),
+    confirm_up: Number((c+atrProxy*0.45).toFixed(2)), risk_down:Number((c-atrProxy*0.45).toFixed(2)),
+    note:'依最新可得美股收盤與個股技術/量價建立情境，非開盤價預測或報酬保證。'
+  };
+}
+
+function renderTomorrowScenario() {
+  G.tomorrowScenario = buildTomorrowScenario();
+  var s = G.tomorrowScenario; if (!s) return '';
+  var col = s.bias==='偏多'?'var(--red)':(s.bias==='偏空'?'var(--green)':'var(--yellow)');
+  var h = '<div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">';
+  h += '<div style="font-weight:700;margin-bottom:8px">🌅 隔日開盤情境評估</div>';
+  h += '<div style="font-size:1.15rem;font-weight:700;color:'+col+'">'+s.bias+'　<span style="font-size:.82rem;color:var(--text-dim)">情境信心 '+s.confidence+'/100</span></div>';
+  h += '<table style="margin-top:8px"><tr><th>本次基準收盤</th><td class="mono">'+fmt(s.base_close)+'（'+escapeHtml(s.date||'')+'）</td></tr>';
+  h += '<tr><th>開高情境</th><td>約 ≥ <span class="mono">'+fmt(s.open_high)+'</span>；突破 '+fmt(s.confirm_up)+' 且量增才視為轉強確認</td></tr>';
+  h += '<tr><th>平開情境</th><td class="mono">'+fmt(s.open_low)+' ～ '+fmt(s.open_high)+'；觀察量能與承接</td></tr>';
+  h += '<tr><th>開低情境</th><td>約 ≤ <span class="mono">'+fmt(s.open_low)+'</span>；跌破 '+fmt(s.risk_down)+' 風險升高</td></tr></table>';
+  if (s.us_parts.length) h += '<div style="font-size:.8rem;color:var(--text-dim);margin-top:7px">美股最近可得收盤：'+escapeHtml(s.us_parts.join('｜'))+'</div>';
+  h += '<div style="font-size:.78rem;color:var(--text-dim);margin-top:6px">'+s.note+'</div></div>';
+  return h;
+}
+
+// ===========================================================================
 // 渲染：全部
 // ===========================================================================
 function renderAll() {
+  G.tomorrowScenario = buildTomorrowScenario();
   renderDecision();
   renderStrategy();
   renderValuation();
@@ -669,6 +728,7 @@ function renderDecision() {
 
   html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:10px">＊ 這是依技術面規則計算的價格決策參考，±1%為執行容忍區間非預測保證，不構成投資建議</div>';
 
+  html += renderTomorrowScenario();
   el.innerHTML = html;
 }
 
@@ -713,6 +773,7 @@ function renderStrategy() {
 
   html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 訊號僅供參考，不構成投資建議；本版本不包含股票池／產業篩選功能</div>';
 
+  html += renderTomorrowScenario();
   el.innerHTML = html;
 }
 
@@ -1308,7 +1369,7 @@ function runGeminiAnalysis() {
   var payload = {
     symbol: G.stockId, name: G.stockName, industry: G.industry,
     scores: G.scores, techData: G.techData, fundData: G.fundData,
-    chipData: G.chipData, usData: G.usData, newsData: G.newsData
+    chipData: G.chipData, usData: G.usData, newsData: G.newsData, tomorrowScenario: G.tomorrowScenario
   };
   fetch('/api/ai/analyze', {
     method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
