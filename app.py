@@ -599,6 +599,29 @@ def fetch_financial_summary(stock_id):
 
 
 # ===========================================================================
+# V2.6.0 股票身分驗證：代號 + 名稱 + 產業，24 小時快取
+# ===========================================================================
+_stock_info_cache = {"ts": 0, "map": {}}
+_STOCK_INFO_TTL = 86400
+
+def fetch_stock_identity(stock_id):
+    now_ts = time.time()
+    if not _stock_info_cache["map"] or now_ts - _stock_info_cache["ts"] > _STOCK_INFO_TTL:
+        rows, err = finmind_get({"dataset": "TaiwanStockInfo"}, timeout=20)
+        if rows:
+            mp = {}
+            for r in rows:
+                sid = str(r.get("stock_id") or "").strip()
+                if sid:
+                    mp[sid] = {
+                        "name": str(r.get("stock_name") or "").strip(),
+                        "industry": str(r.get("industry_category") or "").strip(),
+                        "market": str(r.get("type") or r.get("market") or "台股").strip(),
+                    }
+            _stock_info_cache.update({"ts": now_ts, "map": mp})
+    return _stock_info_cache["map"].get(str(stock_id), {})
+
+# ===========================================================================
 # 大盤環境引擎：以台灣加權指數 001 為基準，所有判斷只使用訊號日前已知資料
 # ===========================================================================
 _market_cache = {"data": None, "ts": 0}
@@ -1797,10 +1820,12 @@ def get_stock_data():
     if not stock_id.isdigit():
         return jsonify({"status": 400, "msg": "請輸入數字股票代號"}), 400
 
-    # --- Step 1: 代號查詢不再額外呼叫 TaiwanStockInfo ---
-    # 名稱查詢由前端另行處理；數字代號健診優先保留 FinMind 配額給核心股價資料。
-    stock_name = ""
-    industry = ""
+    # --- Step 1: V2.6.0 先驗證股票身分，避免只顯示數字代號造成誤查 ---
+    ident = fetch_stock_identity(stock_id)
+    stock_name = ident.get("name", "")
+    industry = ident.get("industry", "")
+    market_name = ident.get("market", "台股")
+    # 身分清單偶爾可能因資料源暫時不可用而空白；若股價存在仍允許分析，前端會標示待確認。
 
     # --- Step 2: 從 FinMind 抓股價（拉長區間以利週KD計算）---
     end_date = datetime.now().strftime("%Y-%m-%d")
@@ -2092,6 +2117,8 @@ def get_stock_data():
         "symbol": stock_id,
         "name": stock_name,
         "industry": industry,
+        "market": market_name,
+        "identity_verified": bool(stock_name),
         "date": latest["Date"],
         "close": round(float(latest["Close"]), 2),
         "prev_close": round(prev_close, 2) if prev_close is not None else None,
@@ -2219,6 +2246,7 @@ def get_us_market():
         "^DJI": "道瓊工業指數",
         "^GSPC": "S&P 500",
         "^IXIC": "那斯達克綜合指數",
+        "^SOX": "費城半導體指數",
     }
     results = []
 
@@ -2543,7 +2571,7 @@ def _compact_ai_payload(payload):
     if not isinstance(payload, dict):
         return {}
     allowed = ["symbol", "name", "industry", "scores", "techData", "fundData",
-               "chipData", "usData", "newsData"]
+               "chipData", "usData", "newsData", "tomorrowScenario"]
     clean = {k: _trim_ai_value(payload.get(k)) for k in allowed if k in payload}
     news = payload.get("newsData")
     if isinstance(news, dict):
@@ -2596,7 +2624,7 @@ def ai_analyze():
 
     instruction = (
         "你是台股分析系統的輔助解讀層。只能根據提供資料客觀整理，不可捏造資料，"
-        "不可覆寫系統計算的價位、停損、評分或回測。使用繁體中文（台灣用語）。"
+        "不可覆寫系統計算的價位、停損、評分、隔日情境或回測。若有 tomorrowScenario，請解釋其條件與風險，不可把情境評估描述成必然漲跌。使用繁體中文（台灣用語）。"
         "請只回傳一個 JSON 物件，不要 Markdown。欄位固定為："
         "summary(80到160字字串)、strengths(最多4項字串陣列)、risks(最多4項)、"
         "watch_points(最多4項)、data_quality(字串)。不要承諾報酬。"
