@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>台股個股健診 V2.6.0 決策引擎版</title>
+<title>台股個股健診 V2.6.1 明日作戰卡介面版</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -132,6 +132,28 @@ tr:last-child td{border-bottom:none}
 /* Error */
 .error-msg{color:var(--red);font-size:.85rem;padding:8px 0}
 .placeholder{text-align:center;padding:30px;color:var(--text-dim);font-size:.9rem}
+
+/* V2.6.1 明日作戰卡 */
+.battle-card{border:1px solid var(--blue);background:linear-gradient(145deg,var(--card),var(--bg2));margin-bottom:16px}
+.battle-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}
+.battle-stock{font-size:1.25rem;font-weight:700;color:var(--heading)}
+.battle-close{font-family:'Roboto Mono',monospace;font-size:1.45rem;font-weight:700}
+.battle-bias{font-size:1.35rem;font-weight:700}
+.battle-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}
+.battle-case{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px}
+.battle-case b{display:block;color:var(--heading);margin-bottom:5px}
+.battle-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:10px 0}
+.battle-kpi{background:rgba(255,255,255,.025);border-radius:8px;padding:9px;text-align:center}
+.battle-kpi small{display:block;color:var(--text-dim);font-size:.72rem}
+.battle-kpi strong{font-family:'Roboto Mono',monospace;font-size:.92rem}
+.detail-card{padding:0}
+.detail-card>summary{list-style:none;cursor:pointer;padding:18px;display:flex;justify-content:space-between;align-items:center}
+.detail-card>summary::-webkit-details-marker{display:none}
+.detail-card>summary .card-title{margin:0;padding:0;border:0;flex:1}
+.detail-card>summary:after{content:'展開 ＋';color:var(--blue);font-size:.82rem;font-weight:700}
+.detail-card[open]>summary:after{content:'收合 －'}
+.detail-card>.card-body{padding:0 18px 18px}
+@media(max-width:640px){.battle-grid{grid-template-columns:1fr}.battle-kpis{grid-template-columns:repeat(2,1fr)}.battle-stock{font-size:1.08rem}}
 </style>
 </head>
 <body>
@@ -139,7 +161,7 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== HEADER ===================== -->
 <div class="header">
   <div class="header-top">
-    <h1>📊 台股個股健診 V2.6.0</h1>
+    <h1>📊 台股個股健診 V2.6.1</h1>
     <div class="report-time" id="reportTime"></div>
   </div>
   <div class="search-bar">
@@ -165,7 +187,13 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== MAIN ===================== -->
 <div class="container">
 
-  <!-- ===== 🎯 交易決策中心（V2.1）===== -->
+  <!-- ===== 🌅 明日作戰卡（V2.6.1 首屏優先）===== -->
+  <div class="card battle-card">
+    <div class="card-title"><span class="icon">🌅</span>明日作戰卡</div>
+    <div class="card-body" id="battleBody"><div class="placeholder">輸入股票代號開始健診</div></div>
+  </div>
+
+  <!-- ===== 🎯 交易決策中心 ===== -->
   <div class="card" style="margin-bottom:16px">
     <div class="card-title"><span class="icon">🎯</span>交易決策中心</div>
     <div class="card-body" id="decisionBody">
@@ -200,28 +228,28 @@ tr:last-child td{border-bottom:none}
   </div>
 
   <!-- ===== 技術面 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">📈</span>技術面分析</div>
+  <details class="card detail-card">
+    <summary><div class="card-title"><span class="icon">📈</span>技術面分析</div></summary>
     <div class="card-body" id="techBody">
       <div class="placeholder">輸入股票代號開始健診</div>
     </div>
-  </div>
+  </details>
 
   <!-- ===== 基本面 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">📋</span>基本面分析</div>
+  <details class="card detail-card">
+    <summary><div class="card-title"><span class="icon">📋</span>基本面分析</div></summary>
     <div class="card-body" id="fundBody">
       <div class="placeholder">輸入股票代號開始健診</div>
     </div>
-  </div>
+  </details>
 
   <!-- ===== 籌碼面 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">💰</span>籌碼面分析</div>
+  <details class="card detail-card">
+    <summary><div class="card-title"><span class="icon">💰</span>籌碼面分析</div></summary>
     <div class="card-body" id="chipBody">
       <div class="placeholder">輸入股票代號開始健診</div>
     </div>
-  </div>
+  </details>
 
   <!-- ===== 法人族群流向 ===== -->
   <div class="card">
@@ -367,6 +395,7 @@ function doSearch() {
   if (!input) return;
   document.getElementById('searchBtn').disabled = true;
   document.getElementById('reportTime').textContent = '';
+  var oldInfo = document.getElementById('stockInfo'); if (oldInfo) oldInfo.remove();
 
   // 重設
   G = {
@@ -377,7 +406,7 @@ function doSearch() {
   };
 
   // 顯示 loading
-  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody','decisionBody'];
+  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody','decisionBody','battleBody'];
   bodies.forEach(function(id){
     document.getElementById(id).innerHTML = loadingHtml('載入中...');
   });
@@ -626,11 +655,38 @@ function renderTomorrowScenario() {
   return h;
 }
 
+// V2.6.1 首屏：明日作戰卡。只呈現隔日最需要看的條件，不取代完整分析。
+function renderBattleCard() {
+  var el = document.getElementById('battleBody');
+  var t = G.techData, s = G.tomorrowScenario || buildTomorrowScenario();
+  if (!el || !t || !s) { if(el) el.innerHTML='<div class="placeholder">隔日情境資料不足</div>'; return; }
+  var dec=t.decision||{}, pd=dec.price_decision||{}, risk=pd.risk||{};
+  var biasColor=s.bias==='偏多'?'var(--red)':(s.bias==='偏空'?'var(--green)':'var(--yellow)');
+  var identity=escapeHtml((G.stockId||'')+(G.stockName?' '+G.stockName:''));
+  if(G.industry) identity+=' <span style="font-size:.78rem;color:var(--text-dim)">｜'+escapeHtml(G.industry)+'</span>';
+  var h='<div class="battle-head"><div><div class="battle-stock">'+identity+'</div><div style="color:var(--text-dim);font-size:.8rem">基準日 '+escapeHtml(s.date||'--')+'｜以最新收盤建立隔日條件</div></div>';
+  h+='<div style="text-align:right"><div class="battle-close">'+fmt(s.base_close)+'</div><div style="font-size:.72rem;color:var(--text-dim)">最新收盤</div></div></div>';
+  h+='<div class="battle-bias" style="color:'+biasColor+'">'+s.bias+' <span style="font-size:.78rem;color:var(--text-dim)">情境信心 '+s.confidence+'/100</span></div>';
+  h+='<div class="battle-kpis">';
+  h+='<div class="battle-kpi"><small>轉強確認</small><strong>'+fmt(s.confirm_up)+'</strong></div>';
+  h+='<div class="battle-kpi"><small>風險警戒</small><strong>'+fmt(s.risk_down)+'</strong></div>';
+  h+='<div class="battle-kpi"><small>技術防守</small><strong>'+(risk.stop!=null?fmt(risk.stop):fmt(t.stopLoss))+'</strong></div>';
+  h+='<div class="battle-kpi"><small>量比</small><strong>'+fmt((t.vol&&t.vol.ratio)||0,2)+'</strong></div></div>';
+  h+='<div class="battle-grid">';
+  h+='<div class="battle-case"><b>🔴 開高</b>約 ≥ <span class="mono">'+fmt(s.open_high)+'</span><br><span style="color:var(--text-dim)">突破 '+fmt(s.confirm_up)+' 且量能放大，才視為有效轉強；開高無量不追價。</span></div>';
+  h+='<div class="battle-case"><b>🟡 平開</b><span class="mono">'+fmt(s.open_low)+' ～ '+fmt(s.open_high)+'</span><br><span style="color:var(--text-dim)">觀察承接與量能，未突破確認價前以區間應對。</span></div>';
+  h+='<div class="battle-case"><b>🟢 開低</b>約 ≤ <span class="mono">'+fmt(s.open_low)+'</span><br><span style="color:var(--text-dim)">跌破 '+fmt(s.risk_down)+' 代表風險升高；先看是否止跌，不急於攤平。</span></div></div>';
+  if(s.us_parts&&s.us_parts.length) h+='<div style="margin-top:10px;font-size:.78rem;color:var(--text-dim)">🇺🇸 美股參考：'+escapeHtml(s.us_parts.join('｜'))+'</div>';
+  h+='<div style="margin-top:8px;font-size:.74rem;color:var(--text-dim)">＊為條件式情境評估，不代表預測明日一定上漲或下跌。</div>';
+  el.innerHTML=h;
+}
+
 // ===========================================================================
 // 渲染：全部
 // ===========================================================================
 function renderAll() {
   G.tomorrowScenario = buildTomorrowScenario();
+  renderBattleCard();
   renderDecision();
   renderStrategy();
   renderValuation();
