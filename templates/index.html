@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>台股個股健診 V2.6.1 明日作戰卡介面版</title>
+<title>台股個股健診 V2.7.0 正式版 盤中量價分級燈號＋異常量警報版</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -133,7 +133,7 @@ tr:last-child td{border-bottom:none}
 .error-msg{color:var(--red);font-size:.85rem;padding:8px 0}
 .placeholder{text-align:center;padding:30px;color:var(--text-dim);font-size:.9rem}
 
-/* V2.6.1 明日作戰卡 */
+/* V2.7.0 正式版｜收盤後量化決策 */
 .battle-card{border:1px solid var(--blue);background:linear-gradient(145deg,var(--card),var(--bg2));margin-bottom:16px}
 .battle-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px}
 .battle-stock{font-size:1.25rem;font-weight:700;color:var(--heading)}
@@ -146,6 +146,26 @@ tr:last-child td{border-bottom:none}
 .battle-kpi{background:rgba(255,255,255,.025);border-radius:8px;padding:9px;text-align:center}
 .battle-kpi small{display:block;color:var(--text-dim);font-size:.72rem}
 .battle-kpi strong{font-family:'Roboto Mono',monospace;font-size:.92rem}
+.intraday-box{margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.025)}
+.intraday-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:9px}
+.intraday-title{font-weight:700;color:var(--heading)}
+.intraday-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.intraday-item{background:var(--card2);border-radius:8px;padding:8px;text-align:center}
+.intraday-item small{display:block;color:var(--text-dim);font-size:.7rem}
+.intraday-item strong{font-family:'Roboto Mono',monospace;font-size:.9rem}
+.intraday-status{margin-top:9px;font-weight:700}
+.traffic-wrap{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:9px}
+.traffic-item{border:1px solid var(--border);border-radius:9px;padding:9px;background:var(--card2);min-height:70px}
+.traffic-item .light-title{font-size:.72rem;color:var(--text-dim);margin-bottom:5px}
+.traffic-item .light-value{font-weight:700;font-size:.88rem;line-height:1.35}
+.traffic-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.light-green{background:#22c55e;box-shadow:0 0 8px rgba(34,197,94,.45)}
+.light-yellow{background:#eab308;box-shadow:0 0 8px rgba(234,179,8,.40)}
+.light-red{background:#ef4444;box-shadow:0 0 8px rgba(239,68,68,.45)}
+.alert-panel{margin-top:8px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:rgba(255,255,255,.018)}
+.alert-line{font-size:.77rem;line-height:1.5;margin:3px 0}
+.mini-btn{border:1px solid var(--border);background:var(--card2);color:var(--text);border-radius:7px;padding:5px 9px;cursor:pointer;font-size:.75rem}
+.mini-btn:hover{border-color:var(--blue)}
 .detail-card{padding:0}
 .detail-card>summary{list-style:none;cursor:pointer;padding:18px;display:flex;justify-content:space-between;align-items:center}
 .detail-card>summary::-webkit-details-marker{display:none}
@@ -153,7 +173,7 @@ tr:last-child td{border-bottom:none}
 .detail-card>summary:after{content:'展開 ＋';color:var(--blue);font-size:.82rem;font-weight:700}
 .detail-card[open]>summary:after{content:'收合 －'}
 .detail-card>.card-body{padding:0 18px 18px}
-@media(max-width:640px){.battle-grid{grid-template-columns:1fr}.battle-kpis{grid-template-columns:repeat(2,1fr)}.battle-stock{font-size:1.08rem}}
+@media(max-width:640px){.battle-grid{grid-template-columns:1fr}.battle-kpis{grid-template-columns:repeat(2,1fr)}.intraday-grid{grid-template-columns:repeat(2,1fr)}.traffic-wrap{grid-template-columns:1fr}.battle-stock{font-size:1.08rem}}
 </style>
 </head>
 <body>
@@ -161,7 +181,7 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== HEADER ===================== -->
 <div class="header">
   <div class="header-top">
-    <h1>📊 台股個股健診 V2.6.1</h1>
+    <h1>📊 台股個股健診 V2.7.0 正式版</h1>
     <div class="report-time" id="reportTime"></div>
   </div>
   <div class="search-bar">
@@ -187,9 +207,9 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== MAIN ===================== -->
 <div class="container">
 
-  <!-- ===== 🌅 明日作戰卡（V2.6.1 首屏優先）===== -->
+  <!-- ===== 投資人五答案：收盤後分析／隔日預測 ===== -->
   <div class="card battle-card">
-    <div class="card-title"><span class="icon">🌅</span>明日作戰卡</div>
+    <div class="card-title"><span class="icon">🎯</span>短線投資決策</div>
     <div class="card-body" id="battleBody"><div class="placeholder">輸入股票代號開始健診</div></div>
   </div>
 
@@ -327,7 +347,7 @@ tr:last-child td{border-bottom:none}
 var G = {
   stockId: '',
   stockName: '',
-  industry: '', market: '', tomorrowScenario: null,
+  industry: '', market: '', tomorrowScenario: null, intradayData: null,
   prices: [],        // [{date, open, max, min, close, Trading_Volume}, ...]
   scores: { tech:0, fund:0, chip:0, us:0, total:0 },
   techData: null,
@@ -337,6 +357,7 @@ var G = {
   newsData: null,
   sectorData: null,
 };
+var intradayTimer = null;
 
 // ===========================================================================
 // 工具函式
@@ -398,8 +419,9 @@ function doSearch() {
   var oldInfo = document.getElementById('stockInfo'); if (oldInfo) oldInfo.remove();
 
   // 重設
+  if (intradayTimer) { clearInterval(intradayTimer); intradayTimer = null; }
   G = {
-    stockId: '', stockName: '', industry: '', market: '', tomorrowScenario: null,
+    stockId: '', stockName: '', industry: '', market: '', tomorrowScenario: null, intradayData: null,
     prices: [], scores: { tech:0, fund:0, chip:0, us:0, total:0 },
     techData: null, fundData: null, chipData: null,
     usData: null, newsData: null, sectorData: null,
@@ -469,6 +491,7 @@ function doSearch() {
     document.querySelector('.header-top').insertAdjacentHTML('afterbegin',
       '<div class="stock-info" id="stockInfo">' + infoHtml + '</div>');
     renderAll();
+    startIntradayRefresh();
   }).catch(function(err){
     bodies.forEach(function(id){
       var el = document.getElementById(id);
@@ -516,7 +539,13 @@ function fetchTechData() {
         kd: { k: j.kd.K, d: j.kd.D, cross: j.kd.cross },
         macd: { dif: j.macd.DIF, dea: j.macd.DEA, hist: j.macd.Hist, dir: j.macd.dir, trend: j.macd.trend },
         bb: { upper: j.bb.Upper, mid: j.bb.Middle, lower: j.bb.Lower, pos: j.bb.pos },
-        vol: { last: j.vol.last, avg5: j.vol.avg5, ratio: j.vol.ratio },
+        vol: {
+          last: j.vol.last, avg5: j.vol.avg5, avg20: j.vol.avg20, ratio: j.vol.ratio,
+          ratioBasis: j.vol.ratio_basis, priceChangePct: j.vol.price_change_pct,
+          efficiency: j.vol.efficiency, status: j.vol.status, mode: j.vol.mode,
+          score: j.vol.score, volumePercentile: j.vol.volume_percentile,
+          returnPercentile: j.vol.return_percentile, sampleSize: j.vol.sample_size
+        },
         recentHigh: j.recent.high, recentLow: j.recent.low,
         buy: { low: j.trade_points.buy_low, high: j.trade_points.buy_high },
         sell: { low: j.trade_points.sell_low, high: j.trade_points.sell_high },
@@ -530,7 +559,9 @@ function fetchTechData() {
         revenueData: j.revenue_data || [],
         valuation: j.valuation || null,
         financial: j.financial || null,
-        position: j.position || null
+        position: j.position || null,
+        quantModel: j.quant_model || null,
+        investorDecision: j.investor_decision || null
       };
     });
 }
@@ -601,6 +632,311 @@ function fetchNews() {
 // ===========================================================================
 
 // ===========================================================================
+// V2.6.7 盤中量價分級燈號＋異常量警報＋假突破過濾
+// - 盤中只打 /api/intraday，不重跑 /api/stock，因此不消耗 FinMind 配額。
+// - 預設 60 秒更新一次；伺服器端另有 20 秒快取。
+// ===========================================================================
+function taipeiNowParts() {
+  var parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone:'Asia/Taipei', year:'numeric', month:'2-digit', day:'2-digit',
+    weekday:'short', hour:'2-digit', minute:'2-digit', hourCycle:'h23'
+  }).formatToParts(new Date());
+  var o={}; parts.forEach(function(x){o[x.type]=x.value;});
+  return o;
+}
+function taipeiYmd() {
+  var p=taipeiNowParts(); return (p.year||'')+(p.month||'')+(p.day||'');
+}
+function isTaiwanMarketHours() {
+  var p=taipeiNowParts(), wd=p.weekday, mins=Number(p.hour)*60+Number(p.minute);
+  return wd!=='Sat' && wd!=='Sun' && mins>=540 && mins<=815; // 09:00~13:35
+}
+function intradayElapsedFraction(d) {
+  var time=(d&&d.time)||'';
+  var m=/^(\d{1,2}):(\d{2})/.exec(time);
+  var mins;
+  if (m) mins=Number(m[1])*60+Number(m[2]);
+  else { var p=taipeiNowParts(); mins=Number(p.hour)*60+Number(p.minute); }
+  if (mins<=540) return 0.06;
+  if (mins>=810) return 1;
+  return Math.max(0.06, Math.min(1,(mins-540)/270));
+}
+function buildDynamicIntradayLevels(s,t,d) {
+  if (!s || !t || !d || d.status!==200) return null;
+  var base=Number(s.base_close), originalUp=Number(s.confirm_up), originalDown=Number(s.risk_down);
+  var current=Number(d.current), open=Number(d.open), high=Number(d.high), low=Number(d.low);
+  if (![base,originalUp,originalDown].every(isFinite)) return null;
+  var dataDate=String(d.date||'').replace(/[^0-9]/g,'');
+  var isToday=!dataDate || dataDate===taipeiYmd();
+  var avg20=Number((t.vol||{}).avg20||0), liveVol=Number(d.volume_shares||0);
+  var frac=intradayElapsedFraction(d);
+  var pace=(avg20>0 && liveVol>0 && frac>0) ? liveVol/(avg20*frac) : null;
+  var mom=Number(s.momentum_component||0);
+  var needPace=Math.max(0.90,Math.min(1.20,1.05-mom*0.10));
+
+  // 盤前價位是錨點；盤中最多只微調基準收盤的 ±0.6%，避免價位追著現價跑。
+  var cap=Math.max(base*0.003, Math.min(base*0.006, Math.max(originalUp-base, base-originalDown)*0.65));
+  if (!isToday || !d.traded || !isFinite(current) || !isFinite(open)) {
+    return {confirm_up:originalUp,risk_down:originalDown,original_up:originalUp,original_down:originalDown,
+      delta:0,cap:cap,pace:pace,needPace:needPace,isToday:isToday,reason:'沿用盤前錨點'};
+  }
+
+  var mid=(isFinite(high)&&isFinite(low))?(high+low)/2:current;
+  // 開盤缺口占主要權重，盤中區間中心只小幅參與，且隨交易時間增加才逐漸提高權重。
+  var shift=(open-base)*0.28 + (mid-base)*(0.08+0.12*frac);
+  var bullish=current>open && current>base;
+  var bearish=current<open && current<base;
+  // 量價同向時，確認門檻略往有利方向靠近；無量突破則不給寬鬆。
+  if (pace!==null && pace>=needPace) {
+    if (bullish) shift += cap*0.14;
+    else if (bearish) shift -= cap*0.14;
+  } else if (pace!==null && pace<0.75) {
+    shift *= 0.65;
+  }
+  // 自適應動能只作小幅修正，不可凌駕當日實際價量。
+  shift += cap*Math.max(-0.12,Math.min(0.12,mom*0.08));
+  shift=Math.max(-cap,Math.min(cap,shift));
+
+  // 轉強價與風險線同向平移，保留盤前原始寬度，不讓早盤雜訊壓縮風險區間。
+  var up=originalUp+shift, down=originalDown+shift;
+  // 若當日高低區間已形成，動態線不得跑到高低點外太遠；只做溫和校正。
+  if (isFinite(high)) up=Math.min(up, high+cap*0.35);
+  if (isFinite(low)) down=Math.max(down, low-cap*0.35);
+  var reason=Math.abs(shift)<base*0.0005?'盤中變化小，接近盤前錨點':(shift>0?'盤中結構上移':'盤中結構下移');
+  return {confirm_up:Number(up.toFixed(2)),risk_down:Number(down.toFixed(2)),original_up:originalUp,original_down:originalDown,
+    delta:Number(shift.toFixed(2)),cap:cap,pace:pace,needPace:needPace,isToday:isToday,reason:reason};
+}
+function intradayMemoryKey(dateText) {
+  return 'twhealth_v267_'+(G.stockId||'unknown')+'_'+String(dateText||taipeiYmd()).replace(/[^0-9]/g,'');
+}
+function loadIntradayMemory(dateText) {
+  try {
+    var raw=localStorage.getItem(intradayMemoryKey(dateText));
+    var arr=raw?JSON.parse(raw):[];
+    return Array.isArray(arr)?arr:[];
+  } catch(e) { return []; }
+}
+function saveIntradayMemory(dateText, arr) {
+  try { localStorage.setItem(intradayMemoryKey(dateText), JSON.stringify((arr||[]).slice(-12))); } catch(e) {}
+}
+function volumeReminder(s,t,d,lv,history) {
+  var pace=lv&&lv.pace!=null?Number(lv.pace):null;
+  if (pace===null || !isFinite(pace)) return {level:'量能資料不足',tone:'var(--text-dim)',detail:'目前無法以歷史均量換算盤中量速。'};
+  var current=Number(d.current), open=Number(d.open), base=Number(s.base_close);
+  var prev=(history&&history.length)?history[history.length-1]:null;
+  var prevPrice=prev?Number(prev.current):NaN;
+  var deltaPrev=(isFinite(prevPrice)&&prevPrice!==0)?(current-prevPrice)/prevPrice*100:0;
+  var dayMove=(isFinite(base)&&base!==0)?(current-base)/base*100:0;
+  var level, tone;
+  if (pace>=1.80) { level='爆量'; tone='var(--orange)'; }
+  else if (pace>=1.35) { level='明顯放量'; tone='var(--red)'; }
+  else if (pace>=lv.needPace) { level='量能充足'; tone='var(--red)'; }
+  else if (pace>=0.80) { level='量能普通'; tone='var(--yellow)'; }
+  else if (pace>=0.60) { level='偏低量'; tone='var(--yellow)'; }
+  else { level='明顯縮量'; tone='var(--text-dim)'; }
+
+  var detail='目前成交節奏約為同期基準的 '+fmt(pace,2)+'×。';
+  if (pace>=1.35) {
+    if (current>open && dayMove>0.35) detail='放量且價格走高，屬量價同向；若能持續站穩關鍵價，突破可信度提高。';
+    else if (current<open && dayMove<-0.35) detail='放量且價格走低，賣壓正在放大；若接近或跌破警戒價，風險需提高。';
+    else if (Math.abs(dayMove)<0.30 && Math.abs(deltaPrev)<0.18) detail='成交明顯放大但價格推進有限，可能是高換手／多空拉鋸，避免只因量大就追價。';
+    else detail='量能明顯放大，需配合價格方向判讀，不能單獨把爆量視為利多。';
+  } else if (pace<0.80) {
+    if (current>=open && dayMove>=0) detail='價格偏強但量能不足，突破時要防假突破，需等待後續補量。';
+    else if (current<open && dayMove<0) detail='回檔伴隨低量，賣壓暫未明顯擴大；仍需守住風險警戒。';
+    else detail='目前成交偏清淡，訊號可信度降低，避免只看單次價格穿越。';
+  }
+  return {level:level,tone:tone,detail:detail,pace:pace};
+}
+function detectVolumeAnomalies(s,t,d,lv,history) {
+  var out=[], pace=lv&&lv.pace!=null?Number(lv.pace):null;
+  var current=Number(d.current), open=Number(d.open), base=Number(s.base_close);
+  if (!isFinite(current) || !isFinite(base) || base===0 || pace===null || !isFinite(pace)) return out;
+  var dayMove=(current-base)/base*100;
+  var openMove=(isFinite(open)&&open!==0)?(current-open)/open*100:0;
+  var prev=(history&&history.length)?history[history.length-1]:null;
+  var prevPace=prev&&prev.pace!=null?Number(prev.pace):null;
+  var prevPrice=prev?Number(prev.current):null;
+  var stepMove=(isFinite(prevPrice)&&prevPrice!==0)?(current-prevPrice)/prevPrice*100:0;
+
+  if (pace>=1.80 && Math.abs(dayMove)<=0.35) out.push({severity:'yellow',name:'爆量滯漲／滯跌',detail:'成交節奏已達 '+fmt(pace,2)+'×，但價格推進有限，可能是高換手或多空拉鋸。'});
+  if (pace>=1.45 && dayMove<=-0.45) out.push({severity:'red',name:'價跌量增',detail:'價格走弱且成交同步放大，賣壓風險高於一般回檔。'});
+  if (pace<0.75 && dayMove>=0.45) out.push({severity:'yellow',name:'價漲量縮',detail:'價格上行但成交跟不上，若接近轉強價仍需防假突破。'});
+  if (pace<0.70 && dayMove<0 && Math.abs(dayMove)<=0.80) out.push({severity:'green',name:'縮量回檔',detail:'回檔伴隨低量，暫未看到明顯放大的賣壓，但仍需守住警戒。'});
+  if (pace>=1.65 && dayMove>=0.45 && openMove>=0) out.push({severity:'green',name:'放量上攻',detail:'價格與成交量同步增強；仍需配合連續站穩轉強價確認。'});
+  if (pace>=1.65 && dayMove>-0.15 && Math.abs(openMove)<0.30) out.push({severity:'yellow',name:'爆量不動',detail:'大量成交但價格幾乎沒有推進，注意高換手、上方供給或短線分歧。'});
+  if (prevPace!==null && isFinite(prevPace)) {
+    if (pace-prevPace>=0.45 && pace>=1.25) out.push({severity:dayMove<0?'red':'yellow',name:'突然放量',detail:'量速由 '+fmt(prevPace,2)+'× 快速升至 '+fmt(pace,2)+'×，需立刻配合價格方向判讀。'});
+    if (prevPace-pace>=0.35 && pace<0.85) out.push({severity:'yellow',name:'量能快速降溫',detail:'量速由 '+fmt(prevPace,2)+'× 降至 '+fmt(pace,2)+'×，原本突破／反彈訊號的延續性需再確認。'});
+  }
+  if (Math.abs(stepMove)>=0.45 && pace>=1.30) out.push({severity:stepMove<0?'red':'yellow',name:'短線價量急變',detail:'最近一次刷新價格變動 '+(stepMove>=0?'+':'')+fmt(stepMove,2)+'%，同時量速偏高，盤中波動正在放大。'});
+  var uniq={}, final=[];
+  out.forEach(function(x){ if(!uniq[x.name]){uniq[x.name]=1;final.push(x);} });
+  return final.slice(0,4);
+}
+function buildTrafficLights(s,t,d,lv,history,confirmation) {
+  var pace=lv&&lv.pace!=null?Number(lv.pace):null, current=Number(d.current), open=Number(d.open), base=Number(s.base_close);
+  var dayMove=(isFinite(current)&&isFinite(base)&&base!==0)?(current-base)/base*100:0;
+  var volume={color:'yellow',label:'量能待確認'};
+  if (pace!==null && isFinite(pace)) {
+    if (pace>=1.35) volume={color:'green',label:'量能明顯'};
+    else if (pace<0.70) volume={color:'yellow',label:'量能偏低'};
+    else volume={color:'yellow',label:'量能一般'};
+  }
+  var price={color:'yellow',label:'價格區間'};
+  if (isFinite(current) && current>=Number(lv.confirm_up)) price={color:'green',label:'站上轉強價'};
+  else if (isFinite(current) && current<=Number(lv.risk_down)) price={color:'red',label:'跌破警戒價'};
+  else if (isFinite(open)&&current>open&&dayMove>0) price={color:'green',label:'價格偏強'};
+  else if (isFinite(open)&&current<open&&dayMove<0) price={color:'red',label:'價格偏弱'};
+
+  var anomalies=detectVolumeAnomalies(s,t,d,lv,history);
+  var hasRed=anomalies.some(function(x){return x.severity==='red';});
+  var hasYellow=anomalies.some(function(x){return x.severity==='yellow';});
+  var combo={color:'yellow',label:'量價仍待確認'};
+  if (confirmation && confirmation.status==='轉強確認' && !hasRed) combo={color:'green',label:'量價條件較完整'};
+  else if (confirmation && (confirmation.status==='轉弱確認' || hasRed)) combo={color:'red',label:'量價風險升高'};
+  else if (price.color==='green' && volume.color==='green' && !hasYellow) combo={color:'green',label:'量價同步偏強'};
+  else if (price.color==='red' && pace!==null && pace>=1.20) combo={color:'red',label:'價弱且量增'};
+  return {price:price,volume:volume,combo:combo,anomalies:anomalies};
+}
+function recordIntradaySnapshot(s,t,d) {
+  if (!s || !t || !d || d.status!==200 || !d.traded) return;
+  var lv=buildDynamicIntradayLevels(s,t,d); if(!lv || !lv.isToday) return;
+  var dateText=d.date||taipeiYmd(), stamp=String(d.time||'')+'|'+String(d.current||'')+'|'+String(d.volume_lots||'');
+  var arr=loadIntradayMemory(dateText);
+  if (arr.length && arr[arr.length-1].stamp===stamp) return;
+  var current=Number(d.current), pace=lv.pace;
+  arr.push({stamp:stamp,time:d.time||'',current:current,pace:pace,
+    aboveUp:current>=Number(lv.confirm_up),belowDown:current<=Number(lv.risk_down),
+    volOk:pace===null?true:pace>=lv.needPace,
+    bullValid:current>=Number(lv.confirm_up) && (pace===null || pace>=lv.needPace)});
+  saveIntradayMemory(dateText,arr);
+}
+function recentSignalMemory(d) {
+  var arr=loadIntradayMemory((d&&d.date)||taipeiYmd());
+  return arr.slice(-4);
+}
+function consecutiveCount(arr, field) {
+  var n=0;
+  for (var i=arr.length-1;i>=0;i--) { if(arr[i]&&arr[i][field]) n++; else break; }
+  return n;
+}
+function buildIntradayConfirmation(s,t,d) {
+  if (!s || !t || !d || d.status!==200) return null;
+  var current=Number(d.current), open=Number(d.open), base=Number(s.base_close);
+  if (!isFinite(current)) return null;
+  var lv=buildDynamicIntradayLevels(s,t,d);
+  if (!lv) return null;
+  var pace=lv.pace, needPace=lv.needPace, isToday=lv.isToday;
+  var mem=recentSignalMemory(d), bullCount=consecutiveCount(mem,'bullValid'), bearCount=consecutiveCount(mem,'belowDown');
+  var prevMem=mem.length>=2?mem[mem.length-2]:null;
+  var volAlert=volumeReminder(s,t,d,lv,mem.slice(0,-1));
+  var status='區間觀察', tone='var(--yellow)', detail='尚未觸發動態轉強或轉弱條件。';
+  if (!isToday || !d.traded) {
+    status=isToday?'尚未形成成交確認':'非當日行情';
+    tone='var(--text-dim)'; detail='僅顯示行情參考，不用舊行情判定盤中轉強／轉弱。';
+  } else if (current>=Number(lv.confirm_up)) {
+    if (pace!==null && pace<needPace) {
+      status='突破但量能不足'; tone='var(--orange)';
+      detail='價格已越過動態轉強價，但量速不足；列為假突破警戒，不直接升級成有效轉強。';
+    } else if (bullCount>=2) {
+      status='轉強確認'; tone='var(--red)';
+      detail='價格已連續至少 2 次更新站上動態轉強價，且量能條件達標，降低單次刺穿造成的假突破。';
+    } else {
+      status='轉強候選 1/2'; tone='var(--orange)';
+      detail='本次價格與量能已符合轉強條件，但需下一次更新仍站穩，才升級為轉強確認。';
+    }
+  } else if (current<=Number(lv.risk_down)) {
+    if (bearCount>=2) {
+      status='轉弱確認'; tone='var(--green)';
+      detail=(pace!==null && pace>=1.35)?'已連續至少 2 次跌破動態警戒且成交放大，轉弱訊號較強。':'已連續至少 2 次跌破動態風險警戒，風險訊號獲得確認。';
+    } else {
+      status='轉弱候選 1/2'; tone='var(--orange)';
+      detail='本次已跌破動態風險警戒，但先等待下一次更新確認，避免單次瞬間跌破造成誤判。';
+    }
+  } else if (prevMem && prevMem.aboveUp) {
+    status='突破失敗觀察'; tone='var(--orange)'; detail='上一筆曾突破轉強價，但這一筆未能續站，視為假突破風險升高。';
+  } else if (prevMem && prevMem.belowDown) {
+    status='跌破後收回觀察'; tone='var(--yellow)'; detail='上一筆曾跌破警戒，但目前已收回，先觀察是否能持續站穩。';
+  } else if (isFinite(open) && current>open && current>base) {
+    status='偏強觀察'; tone='var(--red)'; detail='現價高於開盤與昨收，但尚未突破盤中動態轉強價。';
+  } else if (isFinite(open) && current<open && current<base) {
+    status='偏弱觀察'; tone='var(--green)'; detail='現價低於開盤與昨收，但尚未跌破盤中動態風險警戒。';
+  }
+  var result={status:status,tone:tone,detail:detail,pace:pace,needPace:needPace,isToday:isToday,levels:lv,
+    bullCount:bullCount,bearCount:bearCount,memoryCount:mem.length,volumeAlert:volAlert};
+  result.traffic=buildTrafficLights(s,t,d,lv,mem.slice(0,-1),result);
+  return result;
+}
+function fetchIntraday(manual) {
+  if (!G.stockId) return Promise.resolve();
+  return fetch('/api/intraday?symbol='+encodeURIComponent(G.stockId))
+    .then(function(r){return r.json();})
+    .then(function(j){
+      G.intradayData=j;
+      var s=G.tomorrowScenario||buildTomorrowScenario();
+      if(s&&G.techData) recordIntradaySnapshot(s,G.techData,j);
+      renderBattleCard(); return j;
+    })
+    .catch(function(){
+      if (manual) G.intradayData={status:503,msg:'即時行情暫時無法更新'};
+      renderBattleCard();
+    });
+}
+function startIntradayRefresh() {
+  if (intradayTimer) clearInterval(intradayTimer);
+  // 首次查詢一次；交易時間內才持續刷新，避免休市時做無意義請求。
+  fetchIntraday(false);
+  intradayTimer=setInterval(function(){ if (isTaiwanMarketHours()) fetchIntraday(false); },60000);
+}
+function renderIntradayBox(s,t) {
+  var d=G.intradayData;
+  if (!d) return '<div class="intraday-box"><div class="intraday-head"><span class="intraday-title">⚡ 盤中第一段確認</span><button class="mini-btn" onclick="fetchIntraday(true)">更新即時行情</button></div><div style="font-size:.78rem;color:var(--text-dim)">正在取得輕量盤中行情；此更新不會重跑 FinMind 健診。</div></div>';
+  if (d.status!==200) return '<div class="intraday-box"><div class="intraday-head"><span class="intraday-title">⚡ 盤中第一段確認</span><button class="mini-btn" onclick="fetchIntraday(true)">重新更新</button></div><div style="font-size:.78rem;color:var(--text-dim)">'+escapeHtml(d.msg||'目前無盤中行情')+'｜不影響上方盤前作戰卡。</div></div>';
+  var c=buildIntradayConfirmation(s,t,d);
+  var pct=d.change_pct==null?'--':((Number(d.change_pct)>=0?'+':'')+fmt(d.change_pct,2)+'%');
+  var pace=c&&c.pace!=null?fmt(c.pace,2)+'×':'--';
+  var vol=d.volume_lots!=null?fmtInt(d.volume_lots)+' 張':'--';
+  var hh=(d.time||'--');
+  var h='<div class="intraday-box"><div class="intraday-head"><span class="intraday-title">⚡ 盤中第一段確認</span><span><span style="font-size:.72rem;color:var(--text-dim)">'+escapeHtml(hh)+'｜TWSE MIS</span> <button class="mini-btn" onclick="fetchIntraday(true)">立即更新</button></span></div>';
+  h+='<div class="intraday-grid">';
+  h+='<div class="intraday-item"><small>即時/參考價</small><strong>'+fmt(d.current)+'</strong></div>';
+  h+='<div class="intraday-item"><small>開盤價</small><strong>'+fmt(d.open)+'</strong></div>';
+  h+='<div class="intraday-item"><small>漲跌幅</small><strong>'+pct+'</strong></div>';
+  h+='<div class="intraday-item"><small>累計量 / 量速</small><strong>'+vol+' / '+pace+'</strong></div></div>';
+  if (c) {
+    var lv=c.levels;
+    if(lv){
+      h+='<div class="intraday-grid" style="margin-top:8px">';
+      h+='<div class="intraday-item"><small>盤中動態轉強</small><strong>'+fmt(lv.confirm_up)+'</strong></div>';
+      h+='<div class="intraday-item"><small>盤中動態警戒</small><strong>'+fmt(lv.risk_down)+'</strong></div>';
+      h+='<div class="intraday-item"><small>盤前轉強錨點</small><strong>'+fmt(lv.original_up)+'</strong></div>';
+      h+='<div class="intraday-item"><small>盤前警戒錨點</small><strong>'+fmt(lv.original_down)+'</strong></div></div>';
+    }
+    h+='<div class="intraday-status" style="color:'+c.tone+'">'+escapeHtml(c.status)+'</div>';
+    h+='<div style="font-size:.78rem;color:var(--text-dim);margin-top:4px">'+escapeHtml(c.detail);
+    if(c.pace!=null) h+='｜目前量速 '+fmt(c.pace,2)+'×，確認門檻約 '+fmt(c.needPace,2)+'×';
+    if(lv) h+='｜'+escapeHtml(lv.reason)+'，本次微調 '+(lv.delta>=0?'+':'')+fmt(lv.delta,2);
+    h+='</div>';
+    if(c.traffic){
+      function lightHtml(x,title){return '<div class="traffic-item"><div class="light-title">'+title+'</div><div class="light-value"><span class="traffic-dot light-'+x.color+'"></span>'+escapeHtml(x.label)+'</div></div>'; }
+      h+='<div class="traffic-wrap">'+lightHtml(c.traffic.price,'價格燈號')+lightHtml(c.traffic.volume,'量能燈號')+lightHtml(c.traffic.combo,'綜合燈號')+'</div>';
+      if(c.traffic.anomalies&&c.traffic.anomalies.length){
+        h+='<div class="alert-panel"><b>🚨 異常量價警報</b>';
+        c.traffic.anomalies.forEach(function(a){var icon=a.severity==='red'?'🔴':(a.severity==='green'?'🟢':'🟡');h+='<div class="alert-line">'+icon+' <b>'+escapeHtml(a.name)+'</b>｜'+escapeHtml(a.detail)+'</div>';});
+        h+='</div>';
+      }
+    }
+    if(c.volumeAlert){
+      h+='<div style="margin-top:8px;padding:8px 10px;border:1px solid var(--border);border-radius:8px"><b style="color:'+c.volumeAlert.tone+'">📣 量能提醒：'+escapeHtml(c.volumeAlert.level)+'</b><div style="font-size:.76rem;color:var(--text-dim);margin-top:3px">'+escapeHtml(c.volumeAlert.detail)+'</div></div>';
+    }
+    h+='<div style="font-size:.72rem;color:var(--text-dim);margin-top:6px">訊號記憶：最近 '+c.memoryCount+' 筆｜連續站上轉強 '+c.bullCount+' 次｜連續跌破警戒 '+c.bearCount+' 次；至少連續 2 次才升級為正式確認。</div>';
+  }
+  h+='<div style="font-size:.72rem;color:var(--text-dim);margin-top:7px">＊V2.6.7 盤中價位以盤前作戰卡為錨點，依開盤缺口、盤中高低與量速有限微調；單次位移受上限保護，不讓價位追著現價跑。盤中仍只更新輕量行情，不重新抓完整歷史資料。</div></div>';
+  return h;
+}
+
+// ===========================================================================
 // V2.6.0 隔日開盤情境引擎
 // 不是預測保證：以最新收盤、個股技術/量價與最近可得美股收盤建立條件式情境。
 // ===========================================================================
@@ -617,25 +953,60 @@ function buildTomorrowScenario() {
     }
   });
   if (wsum) usScore /= wsum;
+
+  // 技術趨勢：避免單一指標主導，均線 / MACD / KD 分散計分。
   var tech = 0;
-  if (t.lastClose > t.ma20) tech += 0.6; else tech -= 0.6;
-  if (t.ma20 > t.ma60) tech += 0.5; else tech -= 0.5;
-  if (t.macd && t.macd.hist > 0) tech += 0.35; else tech -= 0.35;
-  if (t.kd && t.kd.k > t.kd.d) tech += 0.25; else tech -= 0.25;
-  var vr = t.vol && t.vol.ratio ? Number(t.vol.ratio) : 1;
-  if (vr < 0.7) tech *= 0.75;
-  var combined = usScore * 0.55 + tech * 0.45;
-  var bias = combined >= 0.55 ? '偏多' : (combined <= -0.55 ? '偏空' : '中性');
-  var confidence = Math.min(80, Math.round(45 + Math.abs(combined)*18));
-  if (!us.length) confidence = Math.min(confidence, 45);
+  if (t.lastClose > t.ma20) tech += 0.60; else tech -= 0.60;
+  if (t.ma20 != null && t.ma60 != null) { if (t.ma20 > t.ma60) tech += 0.50; else tech -= 0.50; }
+  if (t.macd && t.macd.hist != null) { if (t.macd.hist > 0) tech += 0.35; else tech -= 0.35; }
+  if (t.kd && t.kd.k != null && t.kd.d != null) { if (t.kd.k > t.kd.d) tech += 0.25; else tech -= 0.25; }
+
+  // V2.6.3：歷史自適應動能正式納入隔日情境。
+  // 分數 50 為中性，壓縮成約 -1 ~ +1；極端高量下跌額外扣分、歷史高量上攻額外加分。
+  var vol = t.vol || {};
+  var mScore = (vol.score === null || vol.score === undefined) ? 50 : Number(vol.score);
+  var momentum = Math.max(-1, Math.min(1, (mScore - 50) / 35));
+  var mStatus = vol.status || '量價資料不足';
+  if (mStatus.indexOf('歷史高量上攻') >= 0) momentum = Math.min(1.15, momentum + 0.15);
+  if (mStatus.indexOf('歷史高量下跌') >= 0) momentum = Math.max(-1.15, momentum - 0.15);
+  if (mStatus.indexOf('鈍化') >= 0) momentum *= 0.65;
+  if (mStatus.indexOf('縮量上漲') >= 0) momentum *= 0.70;
+
+  // 三軸：美股 45%、個股技術 35%、個股歷史動能 20%。
+  // 沒有美股資料時，不讓缺值被當成中性優勢，改以個股兩軸重新正規化。
+  var combined;
+  if (wsum) combined = usScore * 0.45 + tech * 0.35 + momentum * 0.20;
+  else combined = tech * 0.64 + momentum * 0.36;
+
+  // 同向加成 / 背離降信心：只改「信心」，不硬改方向。
+  var usDir = usScore > 0.25 ? 1 : (usScore < -0.25 ? -1 : 0);
+  var techDir = tech > 0.25 ? 1 : (tech < -0.25 ? -1 : 0);
+  var momDir = momentum > 0.18 ? 1 : (momentum < -0.18 ? -1 : 0);
+  var aligned = (usDir && usDir===techDir && techDir===momDir);
+  var conflict = (techDir && momDir && techDir!==momDir) || (usDir && techDir && usDir!==techDir);
+
+  var bias = combined >= 0.48 ? '偏多' : (combined <= -0.48 ? '偏空' : '中性');
+  var confidence = Math.round(45 + Math.abs(combined)*20);
+  if (aligned) confidence += 8;
+  if (conflict) confidence -= 8;
+  if (!wsum) confidence -= 5;
+  if (vol.mode === 'fallback' || vol.mode === 'insufficient') confidence -= 4;
+  confidence = Math.max(35, Math.min(85, confidence));
+
   var c = Number(t.lastClose), atrProxy = Math.max(c*0.008, Math.abs((t.bb&&t.bb.upper||c)-(t.bb&&t.bb.lower||c))/4 || c*0.012);
+  // 動能越強，轉強確認價略靠近；動能越弱，風險警戒略靠近。
+  var upFactor = Math.max(0.34, Math.min(0.52, 0.45 - momentum*0.055));
+  var downFactor = Math.max(0.34, Math.min(0.52, 0.45 + momentum*0.055));
   var gap = Math.max(c*0.003, atrProxy*0.28);
   return {
     base_close:c, date:t.lastDate, bias:bias, confidence:confidence,
-    us_score:Number(usScore.toFixed(3)), tech_score:Number(tech.toFixed(3)), us_parts:parts,
+    us_score:Number(usScore.toFixed(3)), tech_score:Number(tech.toFixed(3)), momentum_score:mScore,
+    momentum_component:Number(momentum.toFixed(3)), momentum_status:mStatus,
+    volume_percentile:vol.volumePercentile, sample_size:vol.sampleSize, momentum_mode:vol.mode,
+    alignment:aligned?'三軸同向':(conflict?'訊號分歧':'部分同向'), us_parts:parts,
     open_high: Number((c+gap).toFixed(2)), open_low:Number((c-gap).toFixed(2)),
-    confirm_up: Number((c+atrProxy*0.45).toFixed(2)), risk_down:Number((c-atrProxy*0.45).toFixed(2)),
-    note:'依最新可得美股收盤與個股技術/量價建立情境，非開盤價預測或報酬保證。'
+    confirm_up: Number((c+atrProxy*upFactor).toFixed(2)), risk_down:Number((c-atrProxy*downFactor).toFixed(2)),
+    note:'依最新可得美股收盤、個股技術趨勢與歷史自適應量價動能建立條件式情境，非開盤價預測或報酬保證。'
   };
 }
 
@@ -655,31 +1026,72 @@ function renderTomorrowScenario() {
   return h;
 }
 
-// V2.6.1 首屏：明日作戰卡。只呈現隔日最需要看的條件，不取代完整分析。
+// 正式版首屏：只呈現投資人真正需要的五個答案。
+function displayInvestorDecision() {
+  var src = G.techData && G.techData.investorDecision;
+  if (!src) return null;
+  var d = JSON.parse(JSON.stringify(src));
+  var missing = [];
+  var fundOk = !!(G.fundData && ((G.fundData.revenue||[]).length || (G.fundData.financial && G.fundData.financial.available)));
+  var chipOk = !!(G.chipData && (((G.chipData.inst||[]).length) || ((G.chipData.margin||[]).length)));
+  var usOk = !!(G.usData && (!('status' in G.usData) || G.usData.status===200));
+  if (!fundOk) missing.push('基本面');
+  if (!chipOk) missing.push('籌碼');
+  if (!usOk) missing.push('美股環境');
+  if (missing.length) {
+    if (d.buy_status === '可以買') d.buy_status = '等待';
+    if (d.add_status === '可以加碼') d.add_status = '小量加碼';
+    else if (d.add_status === '小量加碼') d.add_status = '暫停加碼';
+    d.display_missing = missing;
+  }
+  return d;
+}
+
+function zoneText(z) {
+  if (!z || z.low==null || z.high==null) return '--';
+  return fmt(z.low) + ' ～ ' + fmt(z.high);
+}
+
+function decisionClass(txt) {
+  if (!txt) return '';
+  if (txt.indexOf('可以')>=0 || txt.indexOf('偏多')>=0 || txt.indexOf('充足')>=0) return 'pos';
+  if (txt.indexOf('不建議')>=0 || txt.indexOf('偏弱')>=0 || txt.indexOf('停損')>=0) return 'neg';
+  return '';
+}
+
 function renderBattleCard() {
   var el = document.getElementById('battleBody');
-  var t = G.techData, s = G.tomorrowScenario || buildTomorrowScenario();
-  if (!el || !t || !s) { if(el) el.innerHTML='<div class="placeholder">隔日情境資料不足</div>'; return; }
-  var dec=t.decision||{}, pd=dec.price_decision||{}, risk=pd.risk||{};
-  var biasColor=s.bias==='偏多'?'var(--red)':(s.bias==='偏空'?'var(--green)':'var(--yellow)');
+  var t = G.techData, d = displayInvestorDecision();
+  if (!el || !t) return;
+  if (!d || d.available===false) {
+    var msg = (d && d.reason) || '核心資料不足，暫不建議新增部位。';
+    el.innerHTML='<div style="font-weight:800;font-size:1.08rem;color:var(--yellow)">資料不足｜先不新增部位</div><div style="margin-top:8px;color:var(--text-dim)">'+escapeHtml(msg)+'</div>';
+    return;
+  }
   var identity=escapeHtml((G.stockId||'')+(G.stockName?' '+G.stockName:''));
-  if(G.industry) identity+=' <span style="font-size:.78rem;color:var(--text-dim)">｜'+escapeHtml(G.industry)+'</span>';
-  var h='<div class="battle-head"><div><div class="battle-stock">'+identity+'</div><div style="color:var(--text-dim);font-size:.8rem">基準日 '+escapeHtml(s.date||'--')+'｜以最新收盤建立隔日條件</div></div>';
-  h+='<div style="text-align:right"><div class="battle-close">'+fmt(s.base_close)+'</div><div style="font-size:.72rem;color:var(--text-dim)">最新收盤</div></div></div>';
-  h+='<div class="battle-bias" style="color:'+biasColor+'">'+s.bias+' <span style="font-size:.78rem;color:var(--text-dim)">情境信心 '+s.confidence+'/100</span></div>';
-  h+='<div class="battle-kpis">';
-  h+='<div class="battle-kpi"><small>轉強確認</small><strong>'+fmt(s.confirm_up)+'</strong></div>';
-  h+='<div class="battle-kpi"><small>風險警戒</small><strong>'+fmt(s.risk_down)+'</strong></div>';
-  h+='<div class="battle-kpi"><small>技術防守</small><strong>'+(risk.stop!=null?fmt(risk.stop):fmt(t.stopLoss))+'</strong></div>';
-  h+='<div class="battle-kpi"><small>量比</small><strong>'+fmt((t.vol&&t.vol.ratio)||0,2)+'</strong></div></div>';
-  h+='<div class="battle-grid">';
-  h+='<div class="battle-case"><b>🔴 開高</b>約 ≥ <span class="mono">'+fmt(s.open_high)+'</span><br><span style="color:var(--text-dim)">突破 '+fmt(s.confirm_up)+' 且量能放大，才視為有效轉強；開高無量不追價。</span></div>';
-  h+='<div class="battle-case"><b>🟡 平開</b><span class="mono">'+fmt(s.open_low)+' ～ '+fmt(s.open_high)+'</span><br><span style="color:var(--text-dim)">觀察承接與量能，未突破確認價前以區間應對。</span></div>';
-  h+='<div class="battle-case"><b>🟢 開低</b>約 ≤ <span class="mono">'+fmt(s.open_low)+'</span><br><span style="color:var(--text-dim)">跌破 '+fmt(s.risk_down)+' 代表風險升高；先看是否止跌，不急於攤平。</span></div></div>';
-  if(s.us_parts&&s.us_parts.length) h+='<div style="margin-top:10px;font-size:.78rem;color:var(--text-dim)">🇺🇸 美股參考：'+escapeHtml(s.us_parts.join('｜'))+'</div>';
-  h+='<div style="margin-top:8px;font-size:.74rem;color:var(--text-dim)">＊為條件式情境評估，不代表預測明日一定上漲或下跌。</div>';
+  var p=d.probabilities||{}, rem=d.remaining_upside||{}, tp=d.take_profit||{}, risk=d.risk||{};
+  var h='<div class="battle-head"><div><div class="battle-stock">'+identity+'</div><div style="color:var(--text-dim);font-size:.8rem">收盤後分析｜基準日 '+escapeHtml(t.lastDate||'--')+'</div></div>';
+  h+='<div style="text-align:right"><div class="battle-close">'+fmt(t.lastClose)+'</div><div style="font-size:.72rem;color:var(--text-dim)">最新收盤</div></div></div>';
+  h+='<div class="battle-grid" style="margin-top:12px">';
+  h+='<div class="battle-case"><b>① 現在能不能買</b><div class="'+decisionClass(d.buy_status)+'" style="font-size:1.2rem;font-weight:800;margin-top:5px">'+escapeHtml(d.buy_status||'--')+'</div></div>';
+  h+='<div class="battle-case"><b>② 已持有能不能加碼</b><div class="'+decisionClass(d.add_status)+'" style="font-size:1.2rem;font-weight:800;margin-top:5px">'+escapeHtml(d.add_status||'--')+'</div></div>';
+  h+='<div class="battle-case"><b>③ 明日方向</b><div class="'+decisionClass(d.tomorrow_direction)+'" style="font-size:1.2rem;font-weight:800;margin-top:5px">'+escapeHtml(d.tomorrow_direction||'--')+'</div><div style="font-size:.76rem;color:var(--text-dim);margin-top:4px">上漲 '+fmt(p.up,1)+'%｜震盪 '+fmt(p.flat,1)+'%｜下跌 '+fmt(p.down,1)+'%</div></div>';
+  h+='</div>';
+  h+='<div style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--card2)">';
+  h+='<div><b>④ 預估剩餘獲利空間</b></div><div style="font-size:1.18rem;font-weight:800;margin-top:5px">約 +'+fmt(rem.low_pct,1)+'% ～ +'+fmt(rem.high_pct,1)+'% <span style="font-size:.85rem;color:var(--text-dim)">｜'+escapeHtml(rem.label||'--')+'</span></div>';
+  h+='</div>';
+  h+='<div style="margin-top:12px"><b>⑤ 停利／停損</b><table style="margin-top:6px">';
+  h+='<tr><th>第一停利區</th><td class="mono pos">'+zoneText(tp.first)+'</td></tr>';
+  h+='<tr><th>主要停利區</th><td class="mono pos">'+zoneText(tp.main)+'</td></tr>';
+  h+='<tr><th>風險警戒</th><td class="mono">'+(risk.warning_price!=null?fmt(risk.warning_price):'--')+'</td></tr>';
+  h+='<tr><th>停損評估</th><td class="mono neg">'+(risk.stop_price!=null?fmt(risk.stop_price):'--')+'</td></tr></table></div>';
+  h+='<div style="margin-top:12px;padding:10px 12px;border-left:3px solid var(--yellow);background:rgba(255,255,255,.03);border-radius:6px"><b>系統結論：</b>'+escapeHtml(d.reason||'')+'</div>';
+  h+='<div style="margin-top:7px;font-size:.74rem;color:var(--text-dim)">模型信心：'+escapeHtml(d.confidence||'--')+(d.model_health?'｜驗證狀態：'+escapeHtml(d.model_health):'')+'。機率為歷史統計估計，不代表保證報酬。</div>';
+  var miss=(d.display_missing||[]).concat(d.data_warnings||[]).filter(function(v,i,a){return v&&a.indexOf(v)===i;});
+  if (miss.length) h+='<div style="margin-top:5px;font-size:.74rem;color:var(--yellow)">⚠ '+escapeHtml(miss.join('、'))+'資料不完整，買進／加碼建議已自動保守降級。</div>';
   el.innerHTML=h;
 }
+
 
 // ===========================================================================
 // 渲染：全部
@@ -894,6 +1306,11 @@ function renderPosition() {
     html += '<tr><th>60MA</th><td class="mono">' + fmt(t.ma60) + ' <span class="' + (t.lastClose > t.ma60 ? 'pos' : 'neg') + '">（股價' + (t.lastClose > t.ma60 ? '在上方' : '在下方') + '）</span></td></tr>';
   }
   html += '<tr><th>成交量</th><td class="mono">' + fmtInt(t.vol.last) + '（20日均量比 ' + fmt(t.vol.ratio,2) + ' 倍）</td></tr>';
+  if (t.vol.volume_percentile != null) {
+    html += '<tr><th>歷史量能位置</th><td class="mono">近 ' + (t.vol.sample_size || 60) + ' 日第 ' + fmt(t.vol.volume_percentile,1) + ' 百分位｜動能分數 ' + fmt(t.vol.score,0) + '｜' + escapeHtml(t.vol.status || '') + '</td></tr>';
+  } else if (t.vol.status) {
+    html += '<tr><th>量價動能</th><td>' + escapeHtml(t.vol.status) + '</td></tr>';
+  }
   if (t.revenueYoy != null) {
     html += '<tr><th>最新營收YoY</th><td class="mono ' + (t.revenueYoy > 0 ? 'pos' : 'neg') + '">' + (t.revenueYoy > 0 ? '+' : '') + fmt(t.revenueYoy,1) + '%</td></tr>';
   }
