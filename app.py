@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-台股個股健診升級版 — Flask 後端
+台股個股健診 V2.7.0 模型核心模組版 — Flask 後端
 ================================
 安裝說明：
     pip install flask requests yfinance pandas
@@ -13,6 +13,7 @@
     /                — 前端頁面
     /api/data        — FinMind API 代理（保留原版）
     /api/stock       — 個股健診主端點（後端 pandas 計算 KD/MACD/布林/均線/評分）
+    /api/intraday    — TWSE/TPEX 輕量盤中行情（不消耗 FinMind 配額）
     /api/news        — Google News RSS 抓取最新新聞
     /api/us_market   — 美股三大指數概況
     /api/sector_flow — 法人產業族群流向（含 1 小時 cache）
@@ -776,7 +777,11 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
         kd5_cross_up = prev["K5"] <= prev["D5"] and cur["K5"] > cur["D5"] and cur["K5"] < 50
         ma5_up = cur["MA5"] >= prev["MA5"]
         price_above_ma5 = cur["Close"] > cur["MA5"]
-        vol_ok = cur["Vol_MA20"] and cur["Volume"] > cur["Vol_MA20"]
+        # V2.6.2 回測也使用當時點以前的歷史量價分布，避免「實盤自適應、回測固定門檻」不一致。
+        prev_close_bt = float(prev["Close"]) if prev["Close"] else None
+        ret1_bt = ((float(cur["Close"]) - prev_close_bt) / prev_close_bt * 100) if prev_close_bt else 0.0
+        vm_bt = calculate_volume_metrics(float(cur["Volume"]), float(cur["Vol_MA20"]), ret1_bt, df=df.iloc[:i+1])
+        vol_ok = vm_bt.get("score", 50) >= 60
         try:
             day_of_month = int(str(cur["Date"])[8:10])
         except Exception:
@@ -1508,42 +1513,666 @@ def calculate_profit_engine(base_price, previous_high20, atr14, valuation, bb_up
 
 
 
-def calculate_volume_metrics(current_volume, avg_volume_20, price_change_pct):
-    """V2.1 統一量比與量價效率。主量比固定以20日均量為基準。"""
+def calculate_volume_metrics(current_volume, avg_volume_20, price_change_pct, df=None, lookback=60):
+    """
+    V2.6.3 歷史自適應量價動能（同步供明日作戰卡使用）。
+
+    優先用個股最近 lookback 個交易日自己的「量比／單日報酬」分布判斷，
+    以百分位取代 1.5 倍、1.2 倍、0.7 倍等固定門檻。不同股票天生量能
+    結構不同，因此同樣 1.3 倍量在不同股票不應被視為完全相同的訊號。
+
+    若歷史樣本不足，才退回 V2.1 固定門檻，確保舊資料與新上市股票仍可運作。
+    """
     if current_volume is None or avg_volume_20 is None or avg_volume_20 <= 0:
         return {
-            "volume_ratio_20": None,
-            "price_change_pct": price_change_pct,
-            "efficiency": None,
-            "status": "資料不足",
-            "score": 50,
+            "volume_ratio_20": None, "price_change_pct": price_change_pct,
+            "efficiency": None, "status": "資料不足", "score": 50,
+            "mode": "insufficient", "volume_percentile": None,
+            "return_percentile": None, "sample_size": 0,
         }
 
-    ratio = current_volume / avg_volume_20
+    ratio = float(current_volume) / float(avg_volume_20)
     pct = float(price_change_pct or 0.0)
-
-    # 效率：每 1 倍量比所換來的價格變化；只作相對評分，不視為預測報酬。
     efficiency = pct / ratio if ratio > 0 else 0.0
 
+    # --- 自適應模式：只拿「今天以前」的資料當歷史基準，避免把今天自己算入門檻 ---
+    try:
+        if df is not None and len(df) >= 25:
+            hist = df.copy()
+            hist_vol = pd.to_numeric(hist["Volume"], errors="coerce")
+            hist_vma = pd.to_numeric(hist["Vol_MA20"], errors="coerce")
+            hist_close = pd.to_numeric(hist["Close"], errors="coerce")
+            hist_ratio = (hist_vol / hist_vma).replace([float("inf"), float("-inf")], pd.NA)
+            hist_ret = hist_close.pct_change() * 100
+
+            # 最後一列是今天；歷史分布排除今天。
+            hr = hist_ratio.iloc[:-1].dropna().tail(lookback)
+            hp = hist_ret.iloc[:-1].dropna().tail(lookback)
+            n = int(min(len(hr), len(hp)))
+            if n >= 20:
+                hr = hr.tail(n)
+                hp = hp.tail(n)
+                vol_pct = float((hr <= ratio).sum() / len(hr) * 100)
+                ret_pct = float((hp <= pct).sum() / len(hp) * 100)
+
+                # 價格方向是主體，量能百分位作「確認／放大」：
+                # 上漲遇高量加分；下跌遇高量加重扣分；低量的漲跌則降低確信度。
+                price_component = (ret_pct - 50.0) * 0.70
+                vol_strength = (vol_pct - 50.0) * 0.30
+                if pct > 0:
+                    raw_score = 50.0 + price_component + vol_strength
+                elif pct < 0:
+                    raw_score = 50.0 + price_component - vol_strength
+                else:
+                    raw_score = 50.0 - abs(vol_strength) * 0.35
+                score = int(round(max(0, min(100, raw_score))))
+
+                if vol_pct >= 85 and ret_pct >= 70:
+                    status = "歷史高量上攻"
+                elif vol_pct >= 85 and ret_pct <= 30:
+                    status = "歷史高量下跌"
+                elif vol_pct >= 85 and 40 <= ret_pct <= 60:
+                    status = "歷史高量但價格鈍化"
+                elif vol_pct <= 20 and pct > 0:
+                    status = "縮量上漲（動能待確認）"
+                elif vol_pct <= 20 and pct < 0:
+                    status = "縮量回檔"
+                elif score >= 70:
+                    status = "量價動能偏多"
+                elif score <= 35:
+                    status = "量價動能偏空"
+                else:
+                    status = "量價中性"
+
+                return {
+                    "volume_ratio_20": round(ratio, 2),
+                    "price_change_pct": round(pct, 2),
+                    "efficiency": round(efficiency, 3),
+                    "status": status,
+                    "score": score,
+                    "mode": "adaptive",
+                    "volume_percentile": round(vol_pct, 1),
+                    "return_percentile": round(ret_pct, 1),
+                    "sample_size": n,
+                    "adaptive_thresholds": {
+                        "volume_p20": round(float(hr.quantile(0.20)), 2),
+                        "volume_p50": round(float(hr.quantile(0.50)), 2),
+                        "volume_p85": round(float(hr.quantile(0.85)), 2),
+                    },
+                }
+    except Exception:
+        pass
+
+    # --- 備援：歷史樣本不足時沿用 V2.1 固定門檻 ---
     if ratio >= 1.5 and pct >= 2.0:
-        status, score = "放量上攻", 90
+        status, score = "放量上攻（備援）", 90
     elif ratio >= 1.2 and pct > 0.5:
-        status, score = "量價偏多", 80
+        status, score = "量價偏多（備援）", 80
     elif ratio >= 1.5 and pct <= -1.0:
-        status, score = "放量下跌", 25
+        status, score = "放量下跌（備援）", 25
     elif ratio >= 1.5 and abs(pct) < 0.5:
-        status, score = "大量不漲", 40
+        status, score = "大量不漲（備援）", 40
     elif ratio < 0.7:
-        status, score = "量能偏弱", 50
+        status, score = "量能偏弱（備援）", 50
     else:
-        status, score = "量價正常", 65
+        status, score = "量價正常（備援）", 65
 
     return {
-        "volume_ratio_20": round(ratio, 2),
-        "price_change_pct": round(pct, 2),
-        "efficiency": round(efficiency, 3),
-        "status": status,
-        "score": score,
+        "volume_ratio_20": round(ratio, 2), "price_change_pct": round(pct, 2),
+        "efficiency": round(efficiency, 3), "status": status, "score": score,
+        "mode": "fallback", "volume_percentile": None,
+        "return_percentile": None, "sample_size": 0,
+    }
+
+
+
+# ===========================================================================
+# V2.7.0 收盤後量化模型核心（第一階段）
+# ---------------------------------------------------------------------------
+# 設計目標：
+# 1) 不以人工加權分數冒充機率；機率來自個股自身歷史「相似狀態」的實際隔日結果。
+# 2) 使用收盤後可取得的資料，不依賴盤中 MIS。
+# 3) 同時產生 Walk-forward 驗證結果；模型不只會預測，也要知道自己過去表現如何。
+# 4) 先作為 shadow model（影子模型）輸出，不立即覆蓋既有五答案，方便實測後再接管。
+# ===========================================================================
+
+MODEL_V1_FEATURES = [
+    "ret1_z", "volume_z", "close_position", "trend_atr",
+    "efficiency_z", "atr_pct_z", "pressure_pct_z",
+]
+
+
+def _finite_float(value, default=None):
+    try:
+        value = float(value)
+        return value if math.isfinite(value) else default
+    except Exception:
+        return default
+
+
+def _weighted_quantile(values, weights, q):
+    """不依賴 numpy 的加權分位數；values/weights 需為同長度數列。"""
+    pairs = []
+    for v, w in zip(values, weights):
+        vv, ww = _finite_float(v), _finite_float(w)
+        if vv is not None and ww is not None and ww > 0:
+            pairs.append((vv, ww))
+    if not pairs:
+        return None
+    pairs.sort(key=lambda x: x[0])
+    total = sum(w for _, w in pairs)
+    target = max(0.0, min(1.0, float(q))) * total
+    acc = 0.0
+    for v, w in pairs:
+        acc += w
+        if acc >= target:
+            return v
+    return pairs[-1][0]
+
+
+def _rolling_z(series, window=60, min_periods=20):
+    """只用『前一日以前』作基準，避免把當日自己放進標準化母體。"""
+    x = pd.to_numeric(series, errors="coerce")
+    mean = x.shift(1).rolling(window, min_periods=min_periods).mean()
+    std = x.shift(1).rolling(window, min_periods=min_periods).std(ddof=0)
+    z = (x - mean) / std.replace(0, pd.NA)
+    return z.clip(-5, 5)
+
+
+def build_financial_features(df):
+    """
+    將既有 OHLCV / 指標轉成統一的金融特徵表。
+
+    每列特徵只使用當日收盤及以前資料；target 欄位才使用下一交易日，
+    因此可用於 Walk-forward 驗證而不偷看未來。
+    """
+    if df is None or len(df) < 80:
+        return pd.DataFrame()
+
+    x = df.copy().reset_index(drop=True)
+    for col in ("Open", "High", "Low", "Close", "Volume", "ATR14", "MA5", "MA20", "MA60"):
+        if col in x.columns:
+            x[col] = pd.to_numeric(x[col], errors="coerce")
+
+    close = x["Close"]
+    volume = x["Volume"]
+    prev_close = close.shift(1)
+    x["ret1_pct"] = close.pct_change() * 100.0
+    x["ret1_z"] = _rolling_z(x["ret1_pct"], 60, 20)
+
+    # 量能：使用當日量 / 前20日平均量。平均量 shift(1) 避免當日量稀釋自身異常程度。
+    vol_base = volume.shift(1).rolling(20, min_periods=10).mean()
+    x["volume_ratio"] = volume / vol_base.replace(0, pd.NA)
+    x["volume_z"] = _rolling_z(x["volume_ratio"], 60, 20)
+
+    # 收盤強度：0=收近最低，1=收近最高。
+    day_range = (x["High"] - x["Low"]).replace(0, pd.NA)
+    x["close_position"] = ((close - x["Low"]) / day_range).clip(0, 1).fillna(0.5)
+
+    # 趨勢強度：收盤相對 MA20 的距離，以 ATR 標準化；比單純均線上下更能跨股票比較。
+    atr = x["ATR14"].replace(0, pd.NA)
+    x["trend_atr"] = ((close - x["MA20"]) / atr).clip(-5, 5)
+
+    # 價格推進效率：單日報酬 / 量比。再以自身歷史做 Z-score。
+    efficiency_raw = x["ret1_pct"] / x["volume_ratio"].replace(0, pd.NA)
+    x["efficiency_raw"] = efficiency_raw
+    x["efficiency_z"] = _rolling_z(efficiency_raw, 60, 20)
+
+    # 波動：ATR / Close。
+    x["atr_pct"] = (atr / close.replace(0, pd.NA)) * 100.0
+    x["atr_pct_z"] = _rolling_z(x["atr_pct"], 60, 20)
+
+    # 上方壓力距離：只看『前一日以前』20日最高，避免今日新高造成偷看式壓力。
+    prev_high20 = x["High"].shift(1).rolling(20, min_periods=10).max()
+    x["pressure_pct"] = ((prev_high20 - close) / close.replace(0, pd.NA) * 100.0).clip(-20, 50)
+    x["pressure_pct_z"] = _rolling_z(x["pressure_pct"], 60, 20)
+
+    # 動態震盪帶：依個股當時 ATR% 決定，設下限避免微小跳動被硬分成漲/跌。
+    # 係數屬模型參數，後續由 Walk-forward 驗證再調，不作永久硬門檻。
+    x["neutral_band_pct"] = (x["atr_pct"] * 0.35).clip(lower=0.35, upper=2.0)
+
+    # 下一交易日標籤：close-to-close 方向；另保存下一日最高/最低供上行與風險區間估計。
+    x["next_ret_pct"] = (close.shift(-1) / close - 1.0) * 100.0
+    x["next_high_pct"] = (x["High"].shift(-1) / close - 1.0) * 100.0
+    x["next_low_pct"] = (x["Low"].shift(-1) / close - 1.0) * 100.0
+
+    def label_row(row):
+        r = _finite_float(row.get("next_ret_pct"))
+        b = _finite_float(row.get("neutral_band_pct"))
+        if r is None or b is None:
+            return None
+        if r > b:
+            return "up"
+        if r < -b:
+            return "down"
+        return "flat"
+
+    x["next_label"] = x.apply(label_row, axis=1)
+    return x
+
+
+def _similarity_prediction(feature_df, target_idx, min_history=80, k=45):
+    """
+    個股自身歷史相似狀態模型。
+    - 只使用 target_idx 以前、且已有隔日結果的資料。
+    - 以歷史分布標準化後計算歐氏距離。
+    - 使用距離倒數加權實際隔日結果，產生 empirical probability。
+    """
+    if feature_df is None or feature_df.empty or target_idx <= 0:
+        return None
+    cur = feature_df.iloc[target_idx]
+    if any(_finite_float(cur.get(c)) is None for c in MODEL_V1_FEATURES):
+        return None
+
+    hist = feature_df.iloc[:target_idx].copy()
+    hist = hist.dropna(subset=MODEL_V1_FEATURES + ["next_label", "next_ret_pct", "next_high_pct", "next_low_pct"])
+    if len(hist) < min_history:
+        return None
+
+    # 只用當時可見歷史來標準化；避免未來資料滲漏。
+    scales = {}
+    centers = {}
+    for c in MODEL_V1_FEATURES:
+        vals = pd.to_numeric(hist[c], errors="coerce")
+        center = float(vals.median())
+        q1, q3 = float(vals.quantile(0.25)), float(vals.quantile(0.75))
+        scale = q3 - q1
+        if not math.isfinite(scale) or scale < 1e-6:
+            scale = float(vals.std(ddof=0))
+        if not math.isfinite(scale) or scale < 1e-6:
+            scale = 1.0
+        centers[c], scales[c] = center, scale
+
+    distances = []
+    for idx, row in hist.iterrows():
+        d2 = 0.0
+        valid = True
+        for c in MODEL_V1_FEATURES:
+            hv, cv = _finite_float(row[c]), _finite_float(cur[c])
+            if hv is None or cv is None:
+                valid = False
+                break
+            d = (hv - cv) / scales[c]
+            d2 += d * d
+        if valid:
+            distances.append((math.sqrt(d2 / len(MODEL_V1_FEATURES)), idx))
+    if len(distances) < min_history:
+        return None
+
+    distances.sort(key=lambda z: z[0])
+    selected = distances[:min(k, len(distances))]
+    eps = 0.20
+    weights = [1.0 / (eps + d) for d, _ in selected]
+    rows = [feature_df.loc[idx] for _, idx in selected]
+
+    # Laplace 型平滑：避免少量相似樣本產生 0% / 100% 假精準。
+    prior = 1.0
+    class_weight = {"up": prior, "flat": prior, "down": prior}
+    for row, w in zip(rows, weights):
+        lab = row.get("next_label")
+        if lab in class_weight:
+            class_weight[lab] += w
+    total = sum(class_weight.values())
+    probs = {k_: class_weight[k_] / total for k_ in class_weight}
+
+    # 小樣本/距離較遠時向全歷史 base rate 收縮，提高穩健性。
+    base_counts = hist["next_label"].value_counts(normalize=True).to_dict()
+    avg_dist = sum(d for d, _ in selected) / len(selected)
+    sample_factor = min(1.0, len(selected) / 45.0)
+    distance_factor = 1.0 / (1.0 + max(0.0, avg_dist - 0.8))
+    reliability = max(0.25, min(1.0, sample_factor * distance_factor))
+    for lab in ("up", "flat", "down"):
+        base = float(base_counts.get(lab, 1.0 / 3.0))
+        probs[lab] = reliability * probs[lab] + (1.0 - reliability) * base
+    norm = sum(probs.values())
+    probs = {lab: probs[lab] / norm for lab in probs}
+
+    next_rets = [row["next_ret_pct"] for row in rows]
+    next_highs = [row["next_high_pct"] for row in rows]
+    next_lows = [row["next_low_pct"] for row in rows]
+    center_ret = _weighted_quantile(next_rets, weights, 0.50)
+    ret_low = _weighted_quantile(next_rets, weights, 0.25)
+    ret_high = _weighted_quantile(next_rets, weights, 0.75)
+    upside_low = _weighted_quantile(next_highs, weights, 0.35)
+    upside_high = _weighted_quantile(next_highs, weights, 0.70)
+    downside = _weighted_quantile(next_lows, weights, 0.30)
+
+    return {
+        "prob_up": probs["up"],
+        "prob_flat": probs["flat"],
+        "prob_down": probs["down"],
+        "center_ret_pct": center_ret,
+        "ret_interval_low_pct": ret_low,
+        "ret_interval_high_pct": ret_high,
+        "upside_low_pct": max(0.0, upside_low) if upside_low is not None else None,
+        "upside_high_pct": max(0.0, upside_high) if upside_high is not None else None,
+        "downside_pct": downside,
+        "sample_size": len(selected),
+        "history_size": len(hist),
+        "avg_distance": avg_dist,
+        "reliability": reliability,
+    }
+
+
+def validate_prediction_model(feature_df, max_tests=60, min_history=80, k=45):
+    """Walk-forward 驗證與簡易機率校準資訊；每一測試日只使用該日以前資料。"""
+    if feature_df is None or len(feature_df) < min_history + 20:
+        return {"available": False, "reason": "歷史樣本不足"}
+    last_labeled = len(feature_df) - 2
+    start = max(min_history, last_labeled - max_tests + 1)
+    records = []
+    for idx in range(start, last_labeled + 1):
+        actual = feature_df.iloc[idx].get("next_label")
+        if actual not in ("up", "flat", "down"):
+            continue
+        pred = _similarity_prediction(feature_df, idx, min_history=min_history, k=k)
+        if not pred:
+            continue
+        probs = {"up": pred["prob_up"], "flat": pred["prob_flat"], "down": pred["prob_down"]}
+        chosen = max(probs, key=probs.get)
+        brier = sum((probs[c] - (1.0 if actual == c else 0.0)) ** 2 for c in probs) / 3.0
+        records.append({"ok": chosen == actual, "brier": brier, "probs": probs, "actual": actual})
+
+    if len(records) < 15:
+        return {"available": False, "reason": "可驗證樣本不足", "sample_size": len(records)}
+
+    n = len(records)
+    accuracy = sum(1 for r in records if r["ok"]) / n
+    brier = sum(r["brier"] for r in records) / n
+
+    actual_counts = {c: sum(1 for r in records if r["actual"] == c) for c in ("up", "flat", "down")}
+    base_rates = {c: actual_counts[c] / n for c in actual_counts}
+    baseline_accuracy = max(base_rates.values())
+    baseline_brier = sum(
+        sum((base_rates[c] - (1.0 if r["actual"] == c else 0.0)) ** 2 for c in base_rates) / 3.0
+        for r in records
+    ) / n
+
+    # 一對多的 empirical recalibration：用實際發生率 / 平均預測率形成保守校準係數。
+    calibration_factors = {}
+    calibration_errors = []
+    for c in ("up", "flat", "down"):
+        avg_p = sum(r["probs"][c] for r in records) / n
+        actual_rate = base_rates[c]
+        factor = (actual_rate + 0.02) / (avg_p + 0.02)
+        factor = max(0.75, min(1.25, factor))
+        calibration_factors[c] = factor
+        calibration_errors.append(abs(avg_p - actual_rate))
+    calibration_error = sum(calibration_errors) / len(calibration_errors)
+
+    if n >= 30 and brier <= baseline_brier and calibration_error <= 0.12:
+        health = "可用"
+    elif n >= 20 and brier <= baseline_brier * 1.08 and calibration_error <= 0.18:
+        health = "保守"
+    else:
+        health = "待加強"
+
+    return {
+        "available": True,
+        "sample_size": n,
+        "accuracy": round(accuracy * 100, 1),
+        "baseline_accuracy": round(baseline_accuracy * 100, 1),
+        "brier": round(brier, 4),
+        "baseline_brier": round(baseline_brier, 4),
+        "calibration_error": round(calibration_error, 4),
+        "calibration_factors": {k_: round(v, 4) for k_, v in calibration_factors.items()},
+        "health": health,
+        "method": "walk_forward_empirical_recalibration",
+    }
+
+
+def predict_tomorrow_direction(df):
+    """正式收盤後明日三方向模型：歷史相似狀態 + Walk-forward 經驗校準。"""
+    features = build_financial_features(df)
+    if features.empty:
+        return {"available": False, "reason": "歷史價量不足"}
+    idx = len(features) - 1
+    pred = _similarity_prediction(features, idx, min_history=80, k=45)
+    if not pred:
+        return {"available": False, "reason": "有效歷史特徵不足"}
+    validation = validate_prediction_model(features, max_tests=60, min_history=80, k=45)
+
+    raw = {"up": pred["prob_up"], "flat": pred["prob_flat"], "down": pred["prob_down"]}
+    probs = dict(raw)
+    if validation.get("available"):
+        factors = validation.get("calibration_factors") or {}
+        for c in probs:
+            probs[c] *= float(factors.get(c, 1.0))
+        total = sum(probs.values()) or 1.0
+        probs = {c: probs[c] / total for c in probs}
+
+    direction = max(probs, key=probs.get)
+    direction_zh = {"up": "偏多", "flat": "震盪", "down": "偏弱"}[direction]
+
+    # 可信度是資料/驗證品質，不等於上漲機率。
+    conf_score = pred["reliability"] * 55.0
+    if validation.get("available"):
+        health = validation.get("health")
+        conf_score += 30.0 if health == "可用" else (18.0 if health == "保守" else 6.0)
+        conf_score += max(0.0, min(15.0, (0.18 - validation.get("calibration_error", 0.18)) / 0.18 * 15.0))
+    conf_score = max(0.0, min(100.0, conf_score))
+    confidence = "高" if conf_score >= 75 else ("中" if conf_score >= 55 else "低")
+
+    return {
+        "available": True,
+        "model": "historical_similarity_calibrated_v1",
+        "direction": direction_zh,
+        "probabilities": {
+            "up": round(probs["up"] * 100, 1),
+            "flat": round(probs["flat"] * 100, 1),
+            "down": round(probs["down"] * 100, 1),
+        },
+        "expected_return": {
+            "center_pct": round(pred["center_ret_pct"], 2) if pred["center_ret_pct"] is not None else None,
+            "low_pct": round(pred["ret_interval_low_pct"], 2) if pred["ret_interval_low_pct"] is not None else None,
+            "high_pct": round(pred["ret_interval_high_pct"], 2) if pred["ret_interval_high_pct"] is not None else None,
+        },
+        "next_day_upside": {
+            "low_pct": round(pred["upside_low_pct"], 2) if pred["upside_low_pct"] is not None else None,
+            "high_pct": round(pred["upside_high_pct"], 2) if pred["upside_high_pct"] is not None else None,
+            "downside_pct": round(pred["downside_pct"], 2) if pred["downside_pct"] is not None else None,
+        },
+        "sample_size": pred["sample_size"],
+        "history_size": pred["history_size"],
+        "confidence": confidence,
+        "confidence_score": round(conf_score, 1),
+        "validation": validation,
+    }
+
+
+def estimate_remaining_upside(model_output, resistance_core=None, close=None):
+    """隔日/短線剩餘上行空間：歷史上行分布為主，壓力位與方向品質做保守修正。"""
+    if not model_output or not model_output.get("available"):
+        return {"available": False, "reason": "方向模型不可用"}
+    u = model_output.get("next_day_upside", {})
+    low = _finite_float(u.get("low_pct"))
+    high = _finite_float(u.get("high_pct"))
+    if low is None or high is None:
+        return {"available": False, "reason": "上行樣本不足"}
+    if high < low:
+        low, high = high, low
+
+    # 非偏多情境仍可有反彈空間，但不把它當成完整可追價空間。
+    direction = model_output.get("direction")
+    if direction == "震盪":
+        low *= 0.85; high *= 0.85
+    elif direction == "偏弱":
+        low *= 0.55; high *= 0.55
+    if model_output.get("confidence") == "低":
+        low *= 0.85; high *= 0.85
+
+    pressure_pct = _finite_float(resistance_core)
+    if pressure_pct is not None and pressure_pct >= 0:
+        high = min(high, pressure_pct)
+        low = min(low, high)
+
+    low = max(0.0, low); high = max(0.0, high)
+    if high < 0.8:
+        label = "不值得追"
+    elif high < 2.0:
+        label = "空間有限"
+    else:
+        label = "空間充足"
+
+    result = {"available": True, "low_pct": round(low, 2), "high_pct": round(high, 2), "label": label}
+    if close is not None and _finite_float(close) is not None:
+        c = float(close)
+        result["low_price"] = round(c * (1 + low / 100.0), 2)
+        result["high_price"] = round(c * (1 + high / 100.0), 2)
+    return result
+
+
+def _price_zone(price, width_pct=0.004):
+    p = _finite_float(price)
+    if p is None or p <= 0:
+        return None
+    return {"low": round(p * (1.0 - width_pct), 2), "high": round(p * (1.0 + width_pct), 2)}
+
+
+def build_investor_decision(model_output, remaining_upside, market_decision, close, position=None, aux_missing=None):
+    """正式五答案決策：風險 > 停利 > 買進 > 加碼 > 方向；缺資料只能保守降級。"""
+    aux_missing = list(aux_missing or [])
+    fallback = {
+        "available": False,
+        "buy_status": "不建議買",
+        "add_status": "暫停加碼",
+        "tomorrow_direction": "資料不足",
+        "remaining_upside": {"low_pct": None, "high_pct": None, "label": "資料不足"},
+        "take_profit": {"first": None, "main": None, "extended": None},
+        "risk": {"warning_price": None, "stop_price": None},
+        "confidence": "低",
+        "reason": "核心資料不足，暫不建議新增部位。",
+        "data_warnings": aux_missing,
+    }
+    if not model_output or not model_output.get("available") or not market_decision:
+        return fallback
+
+    probs = model_output.get("probabilities") or {}
+    up = _finite_float(probs.get("up"), 0.0)
+    down = _finite_float(probs.get("down"), 0.0)
+    direction = model_output.get("direction", "震盪")
+    rem = remaining_upside if isinstance(remaining_upside, dict) else {}
+    up_low = _finite_float(rem.get("low_pct"), 0.0)
+    up_high = _finite_float(rem.get("high_pct"), 0.0)
+    space_label = rem.get("label") or ("空間充足" if up_high >= 2.0 else ("空間有限" if up_high >= 0.8 else "不值得追"))
+
+    pd = market_decision.get("price_decision") or {}
+    risk = pd.get("risk") or {}
+    profit = pd.get("profit") or {}
+    stop_price = _finite_float(risk.get("stop"))
+    warning_price = _finite_float(risk.get("warning"))
+    risk_hit = bool(risk.get("hit"))
+    risk_warning = bool(risk.get("warning_triggered"))
+    target1 = _finite_float(profit.get("target1"))
+    target2 = _finite_float(profit.get("target2"))
+    trailing = _finite_float(profit.get("trailing"))
+    c = _finite_float(close)
+
+    # 統計上行空間與既有壓力/ATR停利聯動，取較保守的可達價。
+    stat_low_price = _finite_float(rem.get("low_price"))
+    stat_high_price = _finite_float(rem.get("high_price"))
+    if c is not None:
+        if stat_low_price is None: stat_low_price = c * (1 + up_low/100.0)
+        if stat_high_price is None: stat_high_price = c * (1 + up_high/100.0)
+    first_candidates = [x for x in (stat_low_price, target1) if x is not None and (c is None or x > c)]
+    main_candidates = [x for x in (stat_high_price, target2) if x is not None and (c is None or x > c)]
+    first_price = min(first_candidates) if first_candidates else (stat_low_price if stat_low_price and (c is None or stat_low_price > c) else None)
+    main_price = min(main_candidates) if main_candidates else (stat_high_price if stat_high_price and (c is None or stat_high_price > c) else None)
+    if first_price is not None and main_price is not None and main_price < first_price:
+        main_price = first_price
+    extended_price = None
+    if direction == "偏多" and model_output.get("confidence") in ("中", "高") and main_price is not None and c is not None:
+        extended_price = max(main_price, c + (main_price - c) * 1.25)
+
+    # 風險報酬以主要停利價相對停損估算。
+    rr = None
+    if c is not None and stop_price is not None and main_price is not None and c > stop_price and main_price > c:
+        rr = (main_price - c) / (c - stop_price)
+
+    health = (model_output.get("validation") or {}).get("health")
+    confidence = model_output.get("confidence", "低")
+    strong_model = confidence in ("中", "高") and health == "可用"
+
+    # 基礎判斷。
+    if risk_hit or direction == "偏弱" or down >= 50:
+        buy_status = "不建議買"
+        add_status = "不建議加碼"
+    elif risk_warning:
+        buy_status = "等待"
+        add_status = "不建議加碼"
+    elif direction == "偏多" and up >= 62 and up_high >= 2.5 and (rr is None or rr >= 1.5) and strong_model:
+        buy_status = "可以買"
+        add_status = "可以加碼"
+    elif direction == "偏多" and up >= 55 and up_high >= 2.0 and (rr is None or rr >= 1.2):
+        buy_status = "可以買" if confidence != "低" else "等待"
+        add_status = "小量加碼" if confidence != "低" else "暫停加碼"
+    elif direction == "偏多" and up_high >= 0.8:
+        buy_status = "等待"
+        add_status = "暫停加碼"
+    elif up_high < 0.8 or (rr is not None and rr < 0.8):
+        buy_status = "不建議買"
+        add_status = "暫停加碼"
+    else:
+        buy_status = "等待"
+        add_status = "暫停加碼"
+
+    # 持股進入停利/停損狀態時，風險優先覆寫加碼。
+    if position:
+        pstatus = position.get("status")
+        if pstatus == "STOP":
+            add_status = "不建議加碼"
+        elif pstatus == "REDUCE":
+            add_status = "暫停加碼"
+
+    # 驗證不夠好或輔助資料缺失時，樂觀訊號只能往保守方向降，不得升級。
+    if health != "可用" or confidence == "低":
+        if buy_status == "可以買": buy_status = "等待"
+        if add_status == "可以加碼": add_status = "小量加碼"
+        elif add_status == "小量加碼": add_status = "暫停加碼"
+    if aux_missing:
+        if buy_status == "可以買": buy_status = "等待"
+        if add_status == "可以加碼": add_status = "小量加碼"
+        elif add_status == "小量加碼": add_status = "暫停加碼"
+
+    if risk_hit:
+        reason = "價格已跌破核心風險位，原多方假設失效，優先風險控制。"
+    elif risk_warning:
+        reason = "價格接近風險警戒，暫停增加部位。"
+    elif direction == "偏弱":
+        reason = "明日模型偏弱，短線下檔風險升高。"
+    elif up_high < 0.8:
+        reason = "明日仍可能波動，但預估剩餘獲利空間不足，不建議追價。"
+    elif direction == "偏多" and buy_status == "可以買":
+        reason = "明日方向偏多，剩餘獲利空間與風險報酬仍具優勢。"
+    elif direction == "偏多":
+        reason = "方向仍偏多，但模型信心、價位或剩餘空間尚未達到積極進場條件。"
+    else:
+        reason = "方向優勢不明顯，先等待更有利的價格與條件。"
+
+    if aux_missing:
+        reason += " 部分輔助資料缺失，操作建議已自動保守降級。"
+
+    return {
+        "available": True,
+        "buy_status": buy_status,
+        "add_status": add_status,
+        "tomorrow_direction": direction,
+        "probabilities": {"up": round(up,1), "flat": round(_finite_float(probs.get("flat"),0.0),1), "down": round(down,1)},
+        "remaining_upside": {"low_pct": round(up_low,2), "high_pct": round(up_high,2), "label": space_label},
+        "take_profit": {
+            "first": _price_zone(first_price),
+            "main": _price_zone(main_price),
+            "extended": _price_zone(extended_price) if extended_price else None,
+        },
+        "risk": {
+            "warning_price": round(warning_price,2) if warning_price is not None else None,
+            "stop_price": round(stop_price,2) if stop_price is not None else None,
+        },
+        "risk_reward": round(rr,2) if rr is not None else None,
+        "confidence": confidence,
+        "model_health": health or "資料不足",
+        "reason": reason,
+        "data_warnings": aux_missing,
     }
 
 
@@ -1744,8 +2373,9 @@ def build_price_decision(latest, prev, df, strategy_pref="short"):
     # V2.1：量比統一以20日均量為主，並加入量價效率
     prev_close = float(prev["Close"]) if (prev is not None and prev["Close"] is not None) else None
     price_change_pct = ((close - prev_close) / prev_close * 100) if (close is not None and prev_close) else 0.0
-    volume_analysis = calculate_volume_metrics(volume, vol_ma20, price_change_pct)
-    vol_ok = volume_analysis["volume_ratio_20"] is not None and 0.7 <= volume_analysis["volume_ratio_20"] <= 2.5
+    volume_analysis = calculate_volume_metrics(volume, vol_ma20, price_change_pct, df=df)
+    # 自適應動能 >=55 視為至少沒有明顯量價拖累；歷史不足時函式會自行使用舊規則。
+    vol_ok = volume_analysis.get("score", 50) >= 55
 
     buy_score, buy_reasons = calculate_buy_score(
         ma20, ma60, close, ma5, kd_cross, k, macd_improving,
@@ -1929,6 +2559,9 @@ def get_stock_data():
     avg_vol5 = float(latest["Vol_MA5"]) if latest["Vol_MA5"] is not None else 0
     avg_vol20 = float(latest["Vol_MA20"]) if latest["Vol_MA20"] is not None else 0
     vol_ratio = last_vol / avg_vol20 if avg_vol20 > 0 else 1.0
+    prev_close_for_vol = float(prev["Close"]) if (prev is not None and prev["Close"] is not None) else None
+    vol_price_change = ((float(latest["Close"]) - prev_close_for_vol) / prev_close_for_vol * 100) if prev_close_for_vol else 0.0
+    adaptive_volume = calculate_volume_metrics(last_vol, avg_vol20, vol_price_change, df=df)
 
     # --- 技術面評分 ---
     # 設計說明：
@@ -1989,10 +2622,11 @@ def get_stock_data():
     else:
         score_max += 1
 
-    if vol_ratio > 1.5:
+    # V2.6.3：成交量採個股歷史百分位動能，並由前端明日作戰卡共同使用。
+    if adaptive_volume.get("score", 50) >= 70:
         score += 1
         score_max += 1
-    elif vol_ratio < 0.5:
+    elif adaptive_volume.get("score", 50) <= 35:
         score -= 1
         score_max += 1
     else:
@@ -2049,6 +2683,26 @@ def get_stock_data():
             )
     except Exception:
         decision = None
+
+    # --- V2.7.0 正式收盤後量化模型：三方向機率 + 剩餘獲利空間 ---
+    quant_model = {"available": False, "reason": "模型尚未計算"}
+    remaining_upside = {"available": False, "reason": "模型尚未計算"}
+    try:
+        quant_model = predict_tomorrow_direction(df)
+        resistance_pct = None
+        if decision is not None:
+            internal_q = decision.get("_internal") or {}
+            resistance_q = internal_q.get("resistance") or {}
+            resistance_price_q = _finite_float(resistance_q.get("core"))
+            if resistance_price_q is not None and float(latest["Close"]) > 0:
+                resistance_pct = max(0.0, (resistance_price_q / float(latest["Close"]) - 1.0) * 100.0)
+        remaining_upside = estimate_remaining_upside(
+            quant_model, resistance_core=resistance_pct, close=float(latest["Close"])
+        )
+        quant_model["remaining_upside"] = remaining_upside
+    except Exception as exc:
+        quant_model = {"available": False, "reason": f"模型計算失敗: {type(exc).__name__}"}
+        remaining_upside = {"available": False, "reason": "模型計算失敗"}
 
     # --- 持股價格即時分析（選填，不存檔，當下輸入當下算）---
     # 用 Exception 而非只抓 ValueError/TypeError，確保這個選填功能萬一
@@ -2109,6 +2763,17 @@ def get_stock_data():
         except Exception:
             position = None
 
+    # --- 正式五答案：模型 + 風險/停利 + 持股狀態，資料缺失採保守降級 ---
+    aux_missing = []
+    if revenue_yoy is None:
+        aux_missing.append("營收")
+    if not isinstance(financial, dict) or not financial.get("available"):
+        aux_missing.append("財報")
+    investor_decision = build_investor_decision(
+        quant_model, remaining_upside, decision, float(latest["Close"]),
+        position=position, aux_missing=aux_missing
+    )
+
     if decision is not None and "_internal" in decision:
         del decision["_internal"]  # 內部欄位，不需要回傳給前端
 
@@ -2156,7 +2821,12 @@ def get_stock_data():
             "ratio_basis": "20日均量",
             "price_change_pct": round(price_change_pct or 0, 2),
             "efficiency": decision.get("volume_price_efficiency") if decision else None,
-            "status": decision.get("volume_status") if decision else "資料不足",
+            "status": decision.get("volume_status") if decision else adaptive_volume.get("status", "資料不足"),
+            "mode": (decision.get("volume_analysis") or {}).get("mode") if decision else adaptive_volume.get("mode"),
+            "score": (decision.get("volume_analysis") or {}).get("score") if decision else adaptive_volume.get("score"),
+            "volume_percentile": (decision.get("volume_analysis") or {}).get("volume_percentile") if decision else adaptive_volume.get("volume_percentile"),
+            "return_percentile": (decision.get("volume_analysis") or {}).get("return_percentile") if decision else adaptive_volume.get("return_percentile"),
+            "sample_size": (decision.get("volume_analysis") or {}).get("sample_size") if decision else adaptive_volume.get("sample_size"),
         },
         "recent": {
             "high": recent_high,
@@ -2180,8 +2850,123 @@ def get_stock_data():
         "financial": financial,
         "decision": decision,
         "position": position,
+        "quant_model": quant_model,
+        "investor_decision": investor_decision,
     }
     return jsonify(result)
+
+
+# ===========================================================================
+# V2.6.7 /api/intraday — 輕量盤中行情（供動態價位引擎使用）
+# ---------------------------------------------------------------------------
+# 只向證交所 MIS 查詢「當下價格 / 開盤 / 高低 / 累計量」，不重跑 FinMind
+# 技術指標，因此盤中刷新不會消耗 FinMind 配額。加 20 秒記憶體快取，避免
+# 使用者連點或多分頁時對公開即時來源造成不必要壓力。
+# ===========================================================================
+_INTRADAY_CACHE = {}
+_INTRADAY_CACHE_TTL = 20
+_INTRADAY_LOCK = threading.Lock()
+
+
+def _twse_float(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text in ("-", "--", "---"):
+        return None
+    # MIS 的買賣價有時以底線串列表示；取第一個可解析值。
+    for part in text.replace(",", "").split("_"):
+        try:
+            return float(part)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+@app.route("/api/intraday")
+def get_intraday_data():
+    stock_id = request.args.get("symbol", "").strip()
+    if not stock_id or not stock_id.isdigit():
+        return jsonify({"status": 400, "msg": "請輸入數字股票代號"}), 400
+
+    now_ts = time.time()
+    with _INTRADAY_LOCK:
+        cached = _INTRADAY_CACHE.get(stock_id)
+        if cached and now_ts - cached.get("ts", 0) < _INTRADAY_CACHE_TTL:
+            return jsonify(cached["payload"])
+
+    # 同一請求同時帶上市與上櫃 channel；無效 channel 會被來源忽略。
+    ex_ch = f"tse_{stock_id}.tw|otc_{stock_id}.tw"
+    try:
+        resp = requests.get(
+            "https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
+            params={"ex_ch": ex_ch, "json": "1", "delay": "0"},
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://mis.twse.com.tw/stock/fibest.jsp",
+                "Accept": "application/json,text/plain,*/*",
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        obj = resp.json()
+        rows = obj.get("msgArray") or []
+        row = next((x for x in rows if str(x.get("c", "")) == stock_id), None)
+        if not row:
+            return jsonify({
+                "status": 404,
+                "msg": "盤中行情暫無資料（可能為休市、非交易時段或即時來源未回應）",
+                "source": "TWSE MIS",
+            }), 404
+
+        current = _twse_float(row.get("z"))
+        # 開盤前 / 尚未成交時 z 可能為 '-'，以最佳買/賣的可得價格作顯示備援，
+        # 但標示 traded=false，避免把委買賣價誤認為成交價。
+        traded = current is not None
+        if current is None:
+            bid = _twse_float(row.get("b"))
+            ask = _twse_float(row.get("a"))
+            if bid is not None and ask is not None:
+                current = round((bid + ask) / 2, 2)
+            else:
+                current = bid if bid is not None else ask
+
+        volume_lots = _twse_float(row.get("v"))
+        volume_shares = int(round(volume_lots * 1000)) if volume_lots is not None else None
+        prev_close = _twse_float(row.get("y"))
+        change_pct = None
+        if current is not None and prev_close not in (None, 0):
+            change_pct = round((current - prev_close) / prev_close * 100, 2)
+
+        payload = {
+            "status": 200,
+            "symbol": stock_id,
+            "name": row.get("n") or "",
+            "market": row.get("ex") or "",
+            "current": current,
+            "open": _twse_float(row.get("o")),
+            "high": _twse_float(row.get("h")),
+            "low": _twse_float(row.get("l")),
+            "prev_close": prev_close,
+            "change_pct": change_pct,
+            "volume_shares": volume_shares,
+            "volume_lots": int(round(volume_lots)) if volume_lots is not None else None,
+            "date": row.get("d") or "",
+            "time": row.get("t") or "",
+            "traded": traded,
+            "source": "TWSE MIS",
+            "cached_seconds": _INTRADAY_CACHE_TTL,
+        }
+        with _INTRADAY_LOCK:
+            _INTRADAY_CACHE[stock_id] = {"ts": now_ts, "payload": payload}
+        return jsonify(payload)
+    except Exception as exc:
+        return jsonify({
+            "status": 503,
+            "msg": "即時行情來源暫時無法連線",
+            "detail": str(exc)[:160],
+            "source": "TWSE MIS",
+        }), 503
 
 
 # ===========================================================================
