@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-台股個股健診 V2.8.0 三頁決策整合版 — Flask 後端
+台股個股健診升級版 — Flask 後端
 ================================
 安裝說明：
     pip install flask requests yfinance pandas
@@ -13,7 +13,6 @@
     /                — 前端頁面
     /api/data        — FinMind API 代理（保留原版）
     /api/stock       — 個股健診主端點（後端 pandas 計算 KD/MACD/布林/均線/評分）
-    /api/intraday    — TWSE/TPEX 輕量盤中行情（不消耗 FinMind 配額）
     /api/news        — Google News RSS 抓取最新新聞
     /api/us_market   — 美股三大指數概況
     /api/sector_flow — 法人產業族群流向（含 1 小時 cache）
@@ -35,6 +34,14 @@ from pathlib import Path
 
 app = Flask(__name__)
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+
+# ===========================================================================
+# V2.8.0 正式穩定整合版標記
+# ===========================================================================
+SYSTEM_VERSION = "2.8.0"
+MODEL_VERSION = "V2.8.0-stable-three-core"
+RELEASE_STAGE = "正式穩定整合版"
+
 
 # 若在 Render 的 Environment Variables 裡設定 FINMIND_TOKEN，
 # 就會帶上 Authorization header，使用個人配額而非匿名共用配額，
@@ -507,120 +514,6 @@ def fetch_revenue_yoy(stock_id):
     return result
 
 
-# V2.5.4 基本面財報快取：季財報一天內不需重抓
-_financial_cache = {}
-_FINANCIAL_CACHE_TTL = 86400
-
-def fetch_financial_summary(stock_id):
-    """
-    取得 FinMind TaiwanStockFinancialStatements 最近約 2 年資料，
-    整理最新 EPS、稅後淨利、營業收入、毛利率、淨利率與同季 EPS 年增率。
-    保留原始揭露口徑，不把累計 EPS 誤稱為單季 EPS。
-    """
-    now_ts = time.time()
-    cached = _financial_cache.get(stock_id)
-    if cached and now_ts - cached[0] < _FINANCIAL_CACHE_TTL:
-        return cached[1]
-    try:
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=900)).strftime("%Y-%m-%d")
-        rows, err = finmind_get({
-            "dataset": "TaiwanStockFinancialStatements",
-            "data_id": stock_id,
-            "start_date": start_date,
-            "end_date": end_date,
-        }, timeout=20)
-        if not rows:
-            result = {"available": False, "message": err or "查無近期財報資料"}
-            _financial_cache[stock_id] = (now_ts, result)
-            return result
-
-        by_date = {}
-        for r in rows:
-            d = str(r.get("date") or "")
-            typ = str(r.get("type") or "")
-            if not d or not typ:
-                continue
-            try:
-                val = float(r.get("value"))
-            except (TypeError, ValueError):
-                continue
-            by_date.setdefault(d, {})[typ] = val
-        dates = sorted(by_date)
-        if not dates:
-            result = {"available": False, "message": "財報格式無有效日期"}
-            _financial_cache[stock_id] = (now_ts, result)
-            return result
-
-        latest_date = dates[-1]
-        latest = by_date[latest_date]
-        eps = latest.get("EPS")
-        income = latest.get("IncomeAfterTaxes")
-        gross = latest.get("GrossProfit")
-        # FinMind 不同產業/時期可能使用 Revenue 或 Income 作為收入欄位
-        revenue = latest.get("Revenue")
-        if revenue is None:
-            revenue = latest.get("OperatingRevenue")
-        if revenue is None:
-            revenue = latest.get("Income")
-
-        eps_yoy = None
-        try:
-            dt = datetime.strptime(latest_date[:10], "%Y-%m-%d")
-            target_year, target_month = dt.year - 1, dt.month
-            prior = None
-            for d in reversed(dates[:-1]):
-                dd = datetime.strptime(d[:10], "%Y-%m-%d")
-                if dd.year == target_year and dd.month == target_month and by_date[d].get("EPS") is not None:
-                    prior = by_date[d].get("EPS")
-                    break
-            if prior not in (None, 0) and eps is not None:
-                eps_yoy = (eps - prior) / abs(prior) * 100
-        except Exception:
-            pass
-
-        gross_margin = (gross / revenue * 100) if gross is not None and revenue not in (None, 0) else None
-        net_margin = (income / revenue * 100) if income is not None and revenue not in (None, 0) else None
-        result = {
-            "available": True,
-            "date": latest_date,
-            "eps": round(eps, 2) if eps is not None else None,
-            "eps_yoy": round(eps_yoy, 2) if eps_yoy is not None else None,
-            "income_after_tax": round(income) if income is not None else None,
-            "statement_revenue": round(revenue) if revenue is not None else None,
-            "gross_margin": round(gross_margin, 2) if gross_margin is not None else None,
-            "net_margin": round(net_margin, 2) if net_margin is not None else None,
-            "source": "FinMind TaiwanStockFinancialStatements",
-        }
-    except Exception as e:
-        result = {"available": False, "message": "財報讀取失敗：" + str(e)[:120]}
-    _financial_cache[stock_id] = (now_ts, result)
-    return result
-
-
-
-# ===========================================================================
-# V2.6.0 股票身分驗證：代號 + 名稱 + 產業，24 小時快取
-# ===========================================================================
-_stock_info_cache = {"ts": 0, "map": {}}
-_STOCK_INFO_TTL = 86400
-
-def fetch_stock_identity(stock_id):
-    now_ts = time.time()
-    if not _stock_info_cache["map"] or now_ts - _stock_info_cache["ts"] > _STOCK_INFO_TTL:
-        rows, err = finmind_get({"dataset": "TaiwanStockInfo"}, timeout=20)
-        if rows:
-            mp = {}
-            for r in rows:
-                sid = str(r.get("stock_id") or "").strip()
-                if sid:
-                    mp[sid] = {
-                        "name": str(r.get("stock_name") or "").strip(),
-                        "industry": str(r.get("industry_category") or "").strip(),
-                        "market": str(r.get("type") or r.get("market") or "台股").strip(),
-                    }
-            _stock_info_cache.update({"ts": now_ts, "map": mp})
-    return _stock_info_cache["map"].get(str(stock_id), {})
 
 # ===========================================================================
 # 大盤環境引擎：以台灣加權指數 001 為基準，所有判斷只使用訊號日前已知資料
@@ -777,11 +670,7 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
         kd5_cross_up = prev["K5"] <= prev["D5"] and cur["K5"] > cur["D5"] and cur["K5"] < 50
         ma5_up = cur["MA5"] >= prev["MA5"]
         price_above_ma5 = cur["Close"] > cur["MA5"]
-        # V2.6.2 回測也使用當時點以前的歷史量價分布，避免「實盤自適應、回測固定門檻」不一致。
-        prev_close_bt = float(prev["Close"]) if prev["Close"] else None
-        ret1_bt = ((float(cur["Close"]) - prev_close_bt) / prev_close_bt * 100) if prev_close_bt else 0.0
-        vm_bt = calculate_volume_metrics(float(cur["Volume"]), float(cur["Vol_MA20"]), ret1_bt, df=df.iloc[:i+1])
-        vol_ok = vm_bt.get("score", 50) >= 60
+        vol_ok = cur["Vol_MA20"] and cur["Volume"] > cur["Vol_MA20"]
         try:
             day_of_month = int(str(cur["Date"])[8:10])
         except Exception:
@@ -792,6 +681,8 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
             entry_price = float(cur["Close"])
             exit_price = float(df.iloc[i + hold_days]["Close"])
             gross_return_pct = (exit_price - entry_price) / entry_price * 100
+            next_close = float(df.iloc[i + 1]["Close"]) if i + 1 < len(df) else None
+            next_day_return_pct = ((next_close - entry_price) / entry_price * 100) if next_close is not None else None
             buy_cost = calculate_trade_costs(entry_price, backtest_lots, "buy")
             sell_cost = calculate_trade_costs(exit_price, backtest_lots, "sell")
             original_cost = buy_cost["market_value"] + buy_cost["fee"]
@@ -817,6 +708,8 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
                 "entry": entry_price,
                 "exit": exit_price,
                 "gross_return_pct": round(gross_return_pct, 3),
+                "next_day_return_pct": round(next_day_return_pct, 3) if next_day_return_pct is not None else None,
+                "next_day_direction_correct": bool(next_day_return_pct is not None and next_day_return_pct > 0),
                 "net_return_pct": round(net_return_pct, 3),
                 "net_pnl": round(net_pnl),
                 "buy_fee": buy_cost["fee"],
@@ -835,11 +728,15 @@ def backtest_short_strategy(stock_id, lookback_days=500, hold_days=5, backtest_l
     wins_net = sum(1 for s in signals if s["net_return_pct"] > 0)
     net_values = [s["net_return_pct"] for s in signals]
     gross_values = [s["gross_return_pct"] for s in signals]
+    next_day = [s["next_day_return_pct"] for s in signals if s.get("next_day_return_pct") is not None]
+    direction_accuracy = (sum(1 for x in next_day if x > 0) / len(next_day) * 100) if next_day else None
     return {
         "stock_id": stock_id,
         "signal_count": len(signals),
         "win_rate": round(wins_net / len(signals) * 100, 1),
         "gross_win_rate": round(wins_gross / len(signals) * 100, 1),
+        "direction_accuracy_1d": round(direction_accuracy, 1) if direction_accuracy is not None else None,
+        "avg_next_day_return": round(sum(next_day) / len(next_day), 3) if next_day else None,
         "avg_return": round(sum(gross_values) / len(gross_values), 3),
         "net_avg_return": round(sum(net_values) / len(net_values), 3),
         "total_net_pnl": round(sum(s["net_pnl"] for s in signals)),
@@ -886,6 +783,77 @@ def calculate_strategy_performance(results):
     gross_profit = sum(x for x in all_returns if x > 0)
     gross_loss = abs(sum(x for x in all_returns if x < 0))
     profit_factor = gross_profit / gross_loss if gross_loss else None
+
+    # V2.7.6：方向準確度 + 風險調整報酬 + 時序穩定度（固定規則策略的Walk-forward式樣本外分段）
+    all_signal_rows = sorted(
+        [s for r in valid for s in r.get("_all_signals", [])],
+        key=lambda x: str(x.get("date", ""))
+    )
+    next_day_values = [float(s["next_day_return_pct"]) for s in all_signal_rows if s.get("next_day_return_pct") is not None]
+    direction_accuracy_1d = (sum(x > 0 for x in next_day_values) / len(next_day_values) * 100) if next_day_values else None
+    avg_next_day_return = (sum(next_day_values) / len(next_day_values)) if next_day_values else None
+
+    mean_ret = avg_net
+    if len(all_returns) >= 2:
+        variance = sum((x - mean_ret) ** 2 for x in all_returns) / (len(all_returns) - 1)
+        std_ret = math.sqrt(variance)
+        sharpe_signal = mean_ret / std_ret if std_ret > 0 else None
+    else:
+        sharpe_signal = None
+    downside = [x for x in all_returns if x < 0]
+    if downside:
+        downside_dev = math.sqrt(sum(x*x for x in downside) / len(downside))
+        sortino_signal = mean_ret / downside_dev if downside_dev > 0 else None
+    else:
+        sortino_signal = None
+
+    wf_folds = []
+    if len(all_signal_rows) >= 9:
+        fold_size = max(3, len(all_signal_rows) // 3)
+        starts = [0, fold_size, fold_size*2]
+        for fi, st in enumerate(starts, start=1):
+            en = len(all_signal_rows) if fi == 3 else min(len(all_signal_rows), st + fold_size)
+            rows = all_signal_rows[st:en]
+            if not rows: continue
+            rets = [float(x.get("net_return_pct", 0)) for x in rows]
+            nd = [float(x["next_day_return_pct"]) for x in rows if x.get("next_day_return_pct") is not None]
+            wf_folds.append({
+                "fold": fi,
+                "start_date": rows[0].get("date"),
+                "end_date": rows[-1].get("date"),
+                "signals": len(rows),
+                "net_win_rate": round(sum(x > 0 for x in rets) / len(rets) * 100, 1),
+                "avg_net_return": round(sum(rets) / len(rets), 3),
+                "direction_accuracy_1d": round(sum(x > 0 for x in nd) / len(nd) * 100, 1) if nd else None,
+            })
+    positive_folds = sum(1 for x in wf_folds if x.get("avg_net_return", 0) > 0)
+    wf_stability = round(positive_folds / len(wf_folds) * 100, 1) if wf_folds else None
+
+    # V2.7.7：近期失效偵測。只比較時間序列後段，不因單次波動立即判死刑。
+    drift = {"status": "資料不足", "recent_signals": 0}
+    if len(all_signal_rows) >= 20:
+        recent = all_signal_rows[-min(20, max(8, len(all_signal_rows)//4)):]
+        prior = all_signal_rows[:-len(recent)]
+        rr = [float(x.get("net_return_pct", 0)) for x in recent]
+        pr = [float(x.get("net_return_pct", 0)) for x in prior] if prior else []
+        recent_win = sum(x > 0 for x in rr) / len(rr) * 100
+        recent_avg = sum(rr) / len(rr)
+        prior_win = (sum(x > 0 for x in pr) / len(pr) * 100) if pr else None
+        prior_avg = (sum(pr) / len(pr)) if pr else None
+        status = "正常"
+        if recent_avg < 0 and prior_avg is not None and prior_avg > 0:
+            status = "降級"
+        elif prior_win is not None and recent_win < prior_win - 15:
+            status = "警戒"
+        drift = {
+            "status": status,
+            "recent_signals": len(rr),
+            "recent_win_rate": round(recent_win, 1),
+            "recent_avg_net_return": round(recent_avg, 3),
+            "prior_win_rate": round(prior_win, 1) if prior_win is not None else None,
+            "prior_avg_net_return": round(prior_avg, 3) if prior_avg is not None else None,
+        }
+
     # 依「訊號當下」的大盤環境分組，驗證策略是否只在多頭有效。
     regime_stats = {}
     for regime in ["強多頭", "多頭", "中性", "空頭", "強空頭", "未知"]:
@@ -910,6 +878,13 @@ def calculate_strategy_performance(results):
         "approx_compound_return": round((equity - 1) * 100, 2),
         "max_drawdown": round(max_dd, 2),
         "profit_factor": round(profit_factor, 2) if profit_factor is not None else None,
+        "direction_accuracy_1d": round(direction_accuracy_1d, 1) if direction_accuracy_1d is not None else None,
+        "avg_next_day_return": round(avg_next_day_return, 3) if avg_next_day_return is not None else None,
+        "sharpe_per_signal": round(sharpe_signal, 3) if sharpe_signal is not None else None,
+        "sortino_per_signal": round(sortino_signal, 3) if sortino_signal is not None else None,
+        "walk_forward_folds": wf_folds,
+        "walk_forward_stability": wf_stability,
+        "model_drift": drift,
         "regime_stats": regime_stats,
         "market_adjusted_win_rate": round(sum(1 for s in [x for r in valid for x in r.get("_all_signals", [])] if s.get("alpha_pct") is not None and s.get("alpha_pct") > 0) / max(1, sum(1 for r in valid for s in r.get("_all_signals", []) if s.get("alpha_pct") is not None)) * 100, 1),
         "total_net_pnl": round(total_net_pnl),
@@ -1513,720 +1488,42 @@ def calculate_profit_engine(base_price, previous_high20, atr14, valuation, bb_up
 
 
 
-def calculate_volume_metrics(current_volume, avg_volume_20, price_change_pct, df=None, lookback=60):
-    """
-    V2.6.3 歷史自適應量價動能（同步供明日作戰卡使用）。
-
-    優先用個股最近 lookback 個交易日自己的「量比／單日報酬」分布判斷，
-    以百分位取代 1.5 倍、1.2 倍、0.7 倍等固定門檻。不同股票天生量能
-    結構不同，因此同樣 1.3 倍量在不同股票不應被視為完全相同的訊號。
-
-    若歷史樣本不足，才退回 V2.1 固定門檻，確保舊資料與新上市股票仍可運作。
-    """
+def calculate_volume_metrics(current_volume, avg_volume_20, price_change_pct):
+    """V2.1 統一量比與量價效率。主量比固定以20日均量為基準。"""
     if current_volume is None or avg_volume_20 is None or avg_volume_20 <= 0:
         return {
-            "volume_ratio_20": None, "price_change_pct": price_change_pct,
-            "efficiency": None, "status": "資料不足", "score": 50,
-            "mode": "insufficient", "volume_percentile": None,
-            "return_percentile": None, "sample_size": 0,
+            "volume_ratio_20": None,
+            "price_change_pct": price_change_pct,
+            "efficiency": None,
+            "status": "資料不足",
+            "score": 50,
         }
 
-    ratio = float(current_volume) / float(avg_volume_20)
+    ratio = current_volume / avg_volume_20
     pct = float(price_change_pct or 0.0)
+
+    # 效率：每 1 倍量比所換來的價格變化；只作相對評分，不視為預測報酬。
     efficiency = pct / ratio if ratio > 0 else 0.0
 
-    # --- 自適應模式：只拿「今天以前」的資料當歷史基準，避免把今天自己算入門檻 ---
-    try:
-        if df is not None and len(df) >= 25:
-            hist = df.copy()
-            hist_vol = pd.to_numeric(hist["Volume"], errors="coerce")
-            hist_vma = pd.to_numeric(hist["Vol_MA20"], errors="coerce")
-            hist_close = pd.to_numeric(hist["Close"], errors="coerce")
-            hist_ratio = (hist_vol / hist_vma).replace([float("inf"), float("-inf")], pd.NA)
-            hist_ret = hist_close.pct_change() * 100
-
-            # 最後一列是今天；歷史分布排除今天。
-            hr = hist_ratio.iloc[:-1].dropna().tail(lookback)
-            hp = hist_ret.iloc[:-1].dropna().tail(lookback)
-            n = int(min(len(hr), len(hp)))
-            if n >= 20:
-                hr = hr.tail(n)
-                hp = hp.tail(n)
-                vol_pct = float((hr <= ratio).sum() / len(hr) * 100)
-                ret_pct = float((hp <= pct).sum() / len(hp) * 100)
-
-                # 價格方向是主體，量能百分位作「確認／放大」：
-                # 上漲遇高量加分；下跌遇高量加重扣分；低量的漲跌則降低確信度。
-                price_component = (ret_pct - 50.0) * 0.70
-                vol_strength = (vol_pct - 50.0) * 0.30
-                if pct > 0:
-                    raw_score = 50.0 + price_component + vol_strength
-                elif pct < 0:
-                    raw_score = 50.0 + price_component - vol_strength
-                else:
-                    raw_score = 50.0 - abs(vol_strength) * 0.35
-                score = int(round(max(0, min(100, raw_score))))
-
-                if vol_pct >= 85 and ret_pct >= 70:
-                    status = "歷史高量上攻"
-                elif vol_pct >= 85 and ret_pct <= 30:
-                    status = "歷史高量下跌"
-                elif vol_pct >= 85 and 40 <= ret_pct <= 60:
-                    status = "歷史高量但價格鈍化"
-                elif vol_pct <= 20 and pct > 0:
-                    status = "縮量上漲（動能待確認）"
-                elif vol_pct <= 20 and pct < 0:
-                    status = "縮量回檔"
-                elif score >= 70:
-                    status = "量價動能偏多"
-                elif score <= 35:
-                    status = "量價動能偏空"
-                else:
-                    status = "量價中性"
-
-                return {
-                    "volume_ratio_20": round(ratio, 2),
-                    "price_change_pct": round(pct, 2),
-                    "efficiency": round(efficiency, 3),
-                    "status": status,
-                    "score": score,
-                    "mode": "adaptive",
-                    "volume_percentile": round(vol_pct, 1),
-                    "return_percentile": round(ret_pct, 1),
-                    "sample_size": n,
-                    "adaptive_thresholds": {
-                        "volume_p20": round(float(hr.quantile(0.20)), 2),
-                        "volume_p50": round(float(hr.quantile(0.50)), 2),
-                        "volume_p85": round(float(hr.quantile(0.85)), 2),
-                    },
-                }
-    except Exception:
-        pass
-
-    # --- 備援：歷史樣本不足時沿用 V2.1 固定門檻 ---
     if ratio >= 1.5 and pct >= 2.0:
-        status, score = "放量上攻（備援）", 90
+        status, score = "放量上攻", 90
     elif ratio >= 1.2 and pct > 0.5:
-        status, score = "量價偏多（備援）", 80
+        status, score = "量價偏多", 80
     elif ratio >= 1.5 and pct <= -1.0:
-        status, score = "放量下跌（備援）", 25
+        status, score = "放量下跌", 25
     elif ratio >= 1.5 and abs(pct) < 0.5:
-        status, score = "大量不漲（備援）", 40
+        status, score = "大量不漲", 40
     elif ratio < 0.7:
-        status, score = "量能偏弱（備援）", 50
+        status, score = "量能偏弱", 50
     else:
-        status, score = "量價正常（備援）", 65
+        status, score = "量價正常", 65
 
     return {
-        "volume_ratio_20": round(ratio, 2), "price_change_pct": round(pct, 2),
-        "efficiency": round(efficiency, 3), "status": status, "score": score,
-        "mode": "fallback", "volume_percentile": None,
-        "return_percentile": None, "sample_size": 0,
-    }
-
-
-
-# ===========================================================================
-# V2.7.0 收盤後量化模型核心（第一階段）
-# ---------------------------------------------------------------------------
-# 設計目標：
-# 1) 不以人工加權分數冒充機率；機率來自個股自身歷史「相似狀態」的實際隔日結果。
-# 2) 使用收盤後可取得的資料，不依賴盤中 MIS。
-# 3) 同時產生 Walk-forward 驗證結果；模型不只會預測，也要知道自己過去表現如何。
-# 4) 先作為 shadow model（影子模型）輸出，不立即覆蓋既有五答案，方便實測後再接管。
-# ===========================================================================
-
-MODEL_V1_FEATURES = [
-    "ret1_z", "volume_z", "close_position", "trend_atr",
-    "efficiency_z", "atr_pct_z", "pressure_pct_z",
-]
-
-
-def _finite_float(value, default=None):
-    try:
-        value = float(value)
-        return value if math.isfinite(value) else default
-    except Exception:
-        return default
-
-
-def _weighted_quantile(values, weights, q):
-    """不依賴 numpy 的加權分位數；values/weights 需為同長度數列。"""
-    pairs = []
-    for v, w in zip(values, weights):
-        vv, ww = _finite_float(v), _finite_float(w)
-        if vv is not None and ww is not None and ww > 0:
-            pairs.append((vv, ww))
-    if not pairs:
-        return None
-    pairs.sort(key=lambda x: x[0])
-    total = sum(w for _, w in pairs)
-    target = max(0.0, min(1.0, float(q))) * total
-    acc = 0.0
-    for v, w in pairs:
-        acc += w
-        if acc >= target:
-            return v
-    return pairs[-1][0]
-
-
-def _rolling_z(series, window=60, min_periods=20):
-    """只用『前一日以前』作基準，避免把當日自己放進標準化母體。"""
-    x = pd.to_numeric(series, errors="coerce")
-    mean = x.shift(1).rolling(window, min_periods=min_periods).mean()
-    std = x.shift(1).rolling(window, min_periods=min_periods).std(ddof=0)
-    z = (x - mean) / std.replace(0, pd.NA)
-    return z.clip(-5, 5)
-
-
-def build_financial_features(df):
-    """
-    將既有 OHLCV / 指標轉成統一的金融特徵表。
-
-    每列特徵只使用當日收盤及以前資料；target 欄位才使用下一交易日，
-    因此可用於 Walk-forward 驗證而不偷看未來。
-    """
-    if df is None or len(df) < 80:
-        return pd.DataFrame()
-
-    x = df.copy().reset_index(drop=True)
-    for col in ("Open", "High", "Low", "Close", "Volume", "ATR14", "MA5", "MA20", "MA60"):
-        if col in x.columns:
-            x[col] = pd.to_numeric(x[col], errors="coerce")
-
-    close = x["Close"]
-    volume = x["Volume"]
-    prev_close = close.shift(1)
-    x["ret1_pct"] = close.pct_change() * 100.0
-    x["ret1_z"] = _rolling_z(x["ret1_pct"], 60, 20)
-
-    # 量能：使用當日量 / 前20日平均量。平均量 shift(1) 避免當日量稀釋自身異常程度。
-    vol_base = volume.shift(1).rolling(20, min_periods=10).mean()
-    x["volume_ratio"] = volume / vol_base.replace(0, pd.NA)
-    x["volume_z"] = _rolling_z(x["volume_ratio"], 60, 20)
-
-    # 收盤強度：0=收近最低，1=收近最高。
-    day_range = (x["High"] - x["Low"]).replace(0, pd.NA)
-    x["close_position"] = ((close - x["Low"]) / day_range).clip(0, 1).fillna(0.5)
-
-    # 趨勢強度：收盤相對 MA20 的距離，以 ATR 標準化；比單純均線上下更能跨股票比較。
-    atr = x["ATR14"].replace(0, pd.NA)
-    x["trend_atr"] = ((close - x["MA20"]) / atr).clip(-5, 5)
-
-    # 價格推進效率：單日報酬 / 量比。再以自身歷史做 Z-score。
-    efficiency_raw = x["ret1_pct"] / x["volume_ratio"].replace(0, pd.NA)
-    x["efficiency_raw"] = efficiency_raw
-    x["efficiency_z"] = _rolling_z(efficiency_raw, 60, 20)
-
-    # 波動：ATR / Close。
-    x["atr_pct"] = (atr / close.replace(0, pd.NA)) * 100.0
-    x["atr_pct_z"] = _rolling_z(x["atr_pct"], 60, 20)
-
-    # 上方壓力距離：只看『前一日以前』20日最高，避免今日新高造成偷看式壓力。
-    prev_high20 = x["High"].shift(1).rolling(20, min_periods=10).max()
-    x["pressure_pct"] = ((prev_high20 - close) / close.replace(0, pd.NA) * 100.0).clip(-20, 50)
-    x["pressure_pct_z"] = _rolling_z(x["pressure_pct"], 60, 20)
-
-    # 動態震盪帶：依個股當時 ATR% 決定，設下限避免微小跳動被硬分成漲/跌。
-    # 係數屬模型參數，後續由 Walk-forward 驗證再調，不作永久硬門檻。
-    x["neutral_band_pct"] = (x["atr_pct"] * 0.35).clip(lower=0.35, upper=2.0)
-
-    # 下一交易日標籤：close-to-close 方向；另保存下一日最高/最低供上行與風險區間估計。
-    x["next_ret_pct"] = (close.shift(-1) / close - 1.0) * 100.0
-    x["next_high_pct"] = (x["High"].shift(-1) / close - 1.0) * 100.0
-    x["next_low_pct"] = (x["Low"].shift(-1) / close - 1.0) * 100.0
-
-    def label_row(row):
-        r = _finite_float(row.get("next_ret_pct"))
-        b = _finite_float(row.get("neutral_band_pct"))
-        if r is None or b is None:
-            return None
-        if r > b:
-            return "up"
-        if r < -b:
-            return "down"
-        return "flat"
-
-    x["next_label"] = x.apply(label_row, axis=1)
-    return x
-
-
-def _similarity_prediction(feature_df, target_idx, min_history=80, k=45):
-    """
-    個股自身歷史相似狀態模型。
-    - 只使用 target_idx 以前、且已有隔日結果的資料。
-    - 以歷史分布標準化後計算歐氏距離。
-    - 使用距離倒數加權實際隔日結果，產生 empirical probability。
-    """
-    if feature_df is None or feature_df.empty or target_idx <= 0:
-        return None
-    cur = feature_df.iloc[target_idx]
-    if any(_finite_float(cur.get(c)) is None for c in MODEL_V1_FEATURES):
-        return None
-
-    hist = feature_df.iloc[:target_idx].copy()
-    hist = hist.dropna(subset=MODEL_V1_FEATURES + ["next_label", "next_ret_pct", "next_high_pct", "next_low_pct"])
-    if len(hist) < min_history:
-        return None
-
-    # 只用當時可見歷史來標準化；避免未來資料滲漏。
-    scales = {}
-    centers = {}
-    for c in MODEL_V1_FEATURES:
-        vals = pd.to_numeric(hist[c], errors="coerce")
-        center = float(vals.median())
-        q1, q3 = float(vals.quantile(0.25)), float(vals.quantile(0.75))
-        scale = q3 - q1
-        if not math.isfinite(scale) or scale < 1e-6:
-            scale = float(vals.std(ddof=0))
-        if not math.isfinite(scale) or scale < 1e-6:
-            scale = 1.0
-        centers[c], scales[c] = center, scale
-
-    distances = []
-    for idx, row in hist.iterrows():
-        d2 = 0.0
-        valid = True
-        for c in MODEL_V1_FEATURES:
-            hv, cv = _finite_float(row[c]), _finite_float(cur[c])
-            if hv is None or cv is None:
-                valid = False
-                break
-            d = (hv - cv) / scales[c]
-            d2 += d * d
-        if valid:
-            distances.append((math.sqrt(d2 / len(MODEL_V1_FEATURES)), idx))
-    if len(distances) < min_history:
-        return None
-
-    distances.sort(key=lambda z: z[0])
-    selected = distances[:min(k, len(distances))]
-    eps = 0.20
-    weights = [1.0 / (eps + d) for d, _ in selected]
-    rows = [feature_df.loc[idx] for _, idx in selected]
-
-    # Laplace 型平滑：避免少量相似樣本產生 0% / 100% 假精準。
-    prior = 1.0
-    class_weight = {"up": prior, "flat": prior, "down": prior}
-    for row, w in zip(rows, weights):
-        lab = row.get("next_label")
-        if lab in class_weight:
-            class_weight[lab] += w
-    total = sum(class_weight.values())
-    probs = {k_: class_weight[k_] / total for k_ in class_weight}
-
-    # 小樣本/距離較遠時向全歷史 base rate 收縮，提高穩健性。
-    base_counts = hist["next_label"].value_counts(normalize=True).to_dict()
-    avg_dist = sum(d for d, _ in selected) / len(selected)
-    sample_factor = min(1.0, len(selected) / 45.0)
-    distance_factor = 1.0 / (1.0 + max(0.0, avg_dist - 0.8))
-    reliability = max(0.25, min(1.0, sample_factor * distance_factor))
-    for lab in ("up", "flat", "down"):
-        base = float(base_counts.get(lab, 1.0 / 3.0))
-        probs[lab] = reliability * probs[lab] + (1.0 - reliability) * base
-    norm = sum(probs.values())
-    probs = {lab: probs[lab] / norm for lab in probs}
-
-    next_rets = [row["next_ret_pct"] for row in rows]
-    next_highs = [row["next_high_pct"] for row in rows]
-    next_lows = [row["next_low_pct"] for row in rows]
-    center_ret = _weighted_quantile(next_rets, weights, 0.50)
-    ret_low = _weighted_quantile(next_rets, weights, 0.25)
-    ret_high = _weighted_quantile(next_rets, weights, 0.75)
-    upside_low = _weighted_quantile(next_highs, weights, 0.35)
-    upside_high = _weighted_quantile(next_highs, weights, 0.70)
-    downside = _weighted_quantile(next_lows, weights, 0.30)
-
-    return {
-        "prob_up": probs["up"],
-        "prob_flat": probs["flat"],
-        "prob_down": probs["down"],
-        "center_ret_pct": center_ret,
-        "ret_interval_low_pct": ret_low,
-        "ret_interval_high_pct": ret_high,
-        "upside_low_pct": max(0.0, upside_low) if upside_low is not None else None,
-        "upside_high_pct": max(0.0, upside_high) if upside_high is not None else None,
-        "downside_pct": downside,
-        "sample_size": len(selected),
-        "history_size": len(hist),
-        "avg_distance": avg_dist,
-        "reliability": reliability,
-    }
-
-
-def validate_prediction_model(feature_df, max_tests=60, min_history=80, k=45):
-    """Walk-forward 驗證與簡易機率校準資訊；每一測試日只使用該日以前資料。"""
-    if feature_df is None or len(feature_df) < min_history + 20:
-        return {"available": False, "reason": "歷史樣本不足"}
-    last_labeled = len(feature_df) - 2
-    start = max(min_history, last_labeled - max_tests + 1)
-    records = []
-    for idx in range(start, last_labeled + 1):
-        actual = feature_df.iloc[idx].get("next_label")
-        if actual not in ("up", "flat", "down"):
-            continue
-        pred = _similarity_prediction(feature_df, idx, min_history=min_history, k=k)
-        if not pred:
-            continue
-        probs = {"up": pred["prob_up"], "flat": pred["prob_flat"], "down": pred["prob_down"]}
-        chosen = max(probs, key=probs.get)
-        brier = sum((probs[c] - (1.0 if actual == c else 0.0)) ** 2 for c in probs) / 3.0
-        records.append({"ok": chosen == actual, "brier": brier, "probs": probs, "actual": actual})
-
-    if len(records) < 15:
-        return {"available": False, "reason": "可驗證樣本不足", "sample_size": len(records)}
-
-    n = len(records)
-    accuracy = sum(1 for r in records if r["ok"]) / n
-    brier = sum(r["brier"] for r in records) / n
-
-    actual_counts = {c: sum(1 for r in records if r["actual"] == c) for c in ("up", "flat", "down")}
-    base_rates = {c: actual_counts[c] / n for c in actual_counts}
-    baseline_accuracy = max(base_rates.values())
-    baseline_brier = sum(
-        sum((base_rates[c] - (1.0 if r["actual"] == c else 0.0)) ** 2 for c in base_rates) / 3.0
-        for r in records
-    ) / n
-
-    # 一對多的 empirical recalibration：用實際發生率 / 平均預測率形成保守校準係數。
-    calibration_factors = {}
-    calibration_errors = []
-    for c in ("up", "flat", "down"):
-        avg_p = sum(r["probs"][c] for r in records) / n
-        actual_rate = base_rates[c]
-        factor = (actual_rate + 0.02) / (avg_p + 0.02)
-        factor = max(0.75, min(1.25, factor))
-        calibration_factors[c] = factor
-        calibration_errors.append(abs(avg_p - actual_rate))
-    calibration_error = sum(calibration_errors) / len(calibration_errors)
-
-    if n >= 30 and brier <= baseline_brier and calibration_error <= 0.12:
-        health = "可用"
-    elif n >= 20 and brier <= baseline_brier * 1.08 and calibration_error <= 0.18:
-        health = "保守"
-    else:
-        health = "待加強"
-
-    return {
-        "available": True,
-        "sample_size": n,
-        "accuracy": round(accuracy * 100, 1),
-        "baseline_accuracy": round(baseline_accuracy * 100, 1),
-        "brier": round(brier, 4),
-        "baseline_brier": round(baseline_brier, 4),
-        "calibration_error": round(calibration_error, 4),
-        "calibration_factors": {k_: round(v, 4) for k_, v in calibration_factors.items()},
-        "health": health,
-        "method": "walk_forward_empirical_recalibration",
-    }
-
-
-def predict_tomorrow_direction(df):
-    """正式收盤後明日三方向模型：歷史相似狀態 + Walk-forward 經驗校準。"""
-    features = build_financial_features(df)
-    if features.empty:
-        return {"available": False, "reason": "歷史價量不足"}
-    idx = len(features) - 1
-    pred = _similarity_prediction(features, idx, min_history=80, k=45)
-    if not pred:
-        return {"available": False, "reason": "有效歷史特徵不足"}
-    validation = validate_prediction_model(features, max_tests=60, min_history=80, k=45)
-
-    raw = {"up": pred["prob_up"], "flat": pred["prob_flat"], "down": pred["prob_down"]}
-    probs = dict(raw)
-    if validation.get("available"):
-        factors = validation.get("calibration_factors") or {}
-        for c in probs:
-            probs[c] *= float(factors.get(c, 1.0))
-        total = sum(probs.values()) or 1.0
-        probs = {c: probs[c] / total for c in probs}
-
-    direction = max(probs, key=probs.get)
-    direction_zh = {"up": "偏多", "flat": "震盪", "down": "偏弱"}[direction]
-
-    # 可信度是資料/驗證品質，不等於上漲機率。
-    conf_score = pred["reliability"] * 55.0
-    if validation.get("available"):
-        health = validation.get("health")
-        conf_score += 30.0 if health == "可用" else (18.0 if health == "保守" else 6.0)
-        conf_score += max(0.0, min(15.0, (0.18 - validation.get("calibration_error", 0.18)) / 0.18 * 15.0))
-    conf_score = max(0.0, min(100.0, conf_score))
-    confidence = "高" if conf_score >= 75 else ("中" if conf_score >= 55 else "低")
-
-    return {
-        "available": True,
-        "model": "historical_similarity_calibrated_v1",
-        "direction": direction_zh,
-        "probabilities": {
-            "up": round(probs["up"] * 100, 1),
-            "flat": round(probs["flat"] * 100, 1),
-            "down": round(probs["down"] * 100, 1),
-        },
-        "expected_return": {
-            "center_pct": round(pred["center_ret_pct"], 2) if pred["center_ret_pct"] is not None else None,
-            "low_pct": round(pred["ret_interval_low_pct"], 2) if pred["ret_interval_low_pct"] is not None else None,
-            "high_pct": round(pred["ret_interval_high_pct"], 2) if pred["ret_interval_high_pct"] is not None else None,
-        },
-        "next_day_upside": {
-            "low_pct": round(pred["upside_low_pct"], 2) if pred["upside_low_pct"] is not None else None,
-            "high_pct": round(pred["upside_high_pct"], 2) if pred["upside_high_pct"] is not None else None,
-            "downside_pct": round(pred["downside_pct"], 2) if pred["downside_pct"] is not None else None,
-        },
-        "sample_size": pred["sample_size"],
-        "history_size": pred["history_size"],
-        "confidence": confidence,
-        "confidence_score": round(conf_score, 1),
-        "validation": validation,
-    }
-
-
-def estimate_remaining_upside(model_output, resistance_core=None, close=None):
-    """隔日/短線剩餘上行空間：歷史上行分布為主，壓力位與方向品質做保守修正。"""
-    if not model_output or not model_output.get("available"):
-        return {"available": False, "reason": "方向模型不可用"}
-    u = model_output.get("next_day_upside", {})
-    low = _finite_float(u.get("low_pct"))
-    high = _finite_float(u.get("high_pct"))
-    if low is None or high is None:
-        return {"available": False, "reason": "上行樣本不足"}
-    if high < low:
-        low, high = high, low
-
-    # 非偏多情境仍可有反彈空間，但不把它當成完整可追價空間。
-    direction = model_output.get("direction")
-    if direction == "震盪":
-        low *= 0.85; high *= 0.85
-    elif direction == "偏弱":
-        low *= 0.55; high *= 0.55
-    if model_output.get("confidence") == "低":
-        low *= 0.85; high *= 0.85
-
-    pressure_pct = _finite_float(resistance_core)
-    if pressure_pct is not None and pressure_pct >= 0:
-        high = min(high, pressure_pct)
-        low = min(low, high)
-
-    low = max(0.0, low); high = max(0.0, high)
-    if high < 0.8:
-        label = "不值得追"
-    elif high < 2.0:
-        label = "空間有限"
-    else:
-        label = "空間充足"
-
-    result = {"available": True, "low_pct": round(low, 2), "high_pct": round(high, 2), "label": label}
-    if close is not None and _finite_float(close) is not None:
-        c = float(close)
-        result["low_price"] = round(c * (1 + low / 100.0), 2)
-        result["high_price"] = round(c * (1 + high / 100.0), 2)
-    return result
-
-
-def _price_zone(price, width_pct=0.004):
-    p = _finite_float(price)
-    if p is None or p <= 0:
-        return None
-    return {"low": round(p * (1.0 - width_pct), 2), "high": round(p * (1.0 + width_pct), 2)}
-
-
-def build_investor_decision(model_output, remaining_upside, market_decision, close, position=None, aux_missing=None):
-    """正式五答案決策：風險 > 停利 > 買進 > 加碼 > 方向；缺資料只能保守降級。"""
-    aux_missing = list(aux_missing or [])
-    fallback = {
-        "available": False,
-        "buy_status": "不建議買",
-        "add_status": "暫停加碼",
-        "tomorrow_direction": "資料不足",
-        "remaining_upside": {"low_pct": None, "high_pct": None, "label": "資料不足"},
-        "take_profit": {"first": None, "main": None, "extended": None},
-        "risk": {"warning_price": None, "stop_price": None},
-        "confidence": "低",
-        "reason": "核心資料不足，暫不建議新增部位。",
-        "data_warnings": aux_missing,
-    }
-    if not model_output or not model_output.get("available") or not market_decision:
-        return fallback
-
-    probs = model_output.get("probabilities") or {}
-    up = _finite_float(probs.get("up"), 0.0)
-    down = _finite_float(probs.get("down"), 0.0)
-    direction = model_output.get("direction", "震盪")
-    rem = remaining_upside if isinstance(remaining_upside, dict) else {}
-    up_low = _finite_float(rem.get("low_pct"), 0.0)
-    up_high = _finite_float(rem.get("high_pct"), 0.0)
-    space_label = rem.get("label") or ("空間充足" if up_high >= 2.0 else ("空間有限" if up_high >= 0.8 else "不值得追"))
-
-    pd = market_decision.get("price_decision") or {}
-    risk = pd.get("risk") or {}
-    profit = pd.get("profit") or {}
-    stop_price = _finite_float(risk.get("stop"))
-    warning_price = _finite_float(risk.get("warning"))
-    risk_hit = bool(risk.get("hit"))
-    risk_warning = bool(risk.get("warning_triggered"))
-    target1 = _finite_float(profit.get("target1"))
-    target2 = _finite_float(profit.get("target2"))
-    trailing = _finite_float(profit.get("trailing"))
-    c = _finite_float(close)
-
-    # 統計上行空間與既有壓力/ATR停利聯動，取較保守的可達價。
-    stat_low_price = _finite_float(rem.get("low_price"))
-    stat_high_price = _finite_float(rem.get("high_price"))
-    if c is not None:
-        if stat_low_price is None: stat_low_price = c * (1 + up_low/100.0)
-        if stat_high_price is None: stat_high_price = c * (1 + up_high/100.0)
-    first_candidates = [x for x in (stat_low_price, target1) if x is not None and (c is None or x > c)]
-    main_candidates = [x for x in (stat_high_price, target2) if x is not None and (c is None or x > c)]
-    first_price = min(first_candidates) if first_candidates else (stat_low_price if stat_low_price and (c is None or stat_low_price > c) else None)
-    main_price = min(main_candidates) if main_candidates else (stat_high_price if stat_high_price and (c is None or stat_high_price > c) else None)
-    if first_price is not None and main_price is not None and main_price < first_price:
-        main_price = first_price
-    extended_price = None
-    if direction == "偏多" and model_output.get("confidence") in ("中", "高") and main_price is not None and c is not None:
-        extended_price = max(main_price, c + (main_price - c) * 1.25)
-
-    # 風險報酬以主要停利價相對停損估算。
-    rr = None
-    if c is not None and stop_price is not None and main_price is not None and c > stop_price and main_price > c:
-        rr = (main_price - c) / (c - stop_price)
-
-    health = (model_output.get("validation") or {}).get("health")
-    confidence = model_output.get("confidence", "低")
-    strong_model = confidence in ("中", "高") and health == "可用"
-
-    # 基礎判斷。
-    if risk_hit or direction == "偏弱" or down >= 50:
-        buy_status = "不建議買"
-        add_status = "不建議加碼"
-    elif risk_warning:
-        buy_status = "等待"
-        add_status = "不建議加碼"
-    elif direction == "偏多" and up >= 62 and up_high >= 2.5 and (rr is None or rr >= 1.5) and strong_model:
-        buy_status = "可以買"
-        add_status = "可以加碼"
-    elif direction == "偏多" and up >= 55 and up_high >= 2.0 and (rr is None or rr >= 1.2):
-        buy_status = "可以買" if confidence != "低" else "等待"
-        add_status = "小量加碼" if confidence != "低" else "暫停加碼"
-    elif direction == "偏多" and up_high >= 0.8:
-        buy_status = "等待"
-        add_status = "暫停加碼"
-    elif up_high < 0.8 or (rr is not None and rr < 0.8):
-        buy_status = "不建議買"
-        add_status = "暫停加碼"
-    else:
-        buy_status = "等待"
-        add_status = "暫停加碼"
-
-    # 持股進入停利/停損狀態時，風險優先覆寫加碼。
-    if position:
-        pstatus = position.get("status")
-        if pstatus == "STOP":
-            add_status = "不建議加碼"
-        elif pstatus == "REDUCE":
-            add_status = "暫停加碼"
-
-    # 驗證不夠好或輔助資料缺失時，樂觀訊號只能往保守方向降，不得升級。
-    if health != "可用" or confidence == "低":
-        if buy_status == "可以買": buy_status = "等待"
-        if add_status == "可以加碼": add_status = "小量加碼"
-        elif add_status == "小量加碼": add_status = "暫停加碼"
-    if aux_missing:
-        if buy_status == "可以買": buy_status = "等待"
-        if add_status == "可以加碼": add_status = "小量加碼"
-        elif add_status == "小量加碼": add_status = "暫停加碼"
-
-    if risk_hit:
-        reason = "價格已跌破核心風險位，原多方假設失效，優先風險控制。"
-    elif risk_warning:
-        reason = "價格接近風險警戒，暫停增加部位。"
-    elif direction == "偏弱":
-        reason = "明日模型偏弱，短線下檔風險升高。"
-    elif up_high < 0.8:
-        reason = "明日仍可能波動，但預估剩餘獲利空間不足，不建議追價。"
-    elif direction == "偏多" and buy_status == "可以買":
-        reason = "明日方向偏多，剩餘獲利空間與風險報酬仍具優勢。"
-    elif direction == "偏多":
-        reason = "方向仍偏多，但模型信心、價位或剩餘空間尚未達到積極進場條件。"
-    else:
-        reason = "方向優勢不明顯，先等待更有利的價格與條件。"
-
-    if aux_missing:
-        reason += " 部分輔助資料缺失，操作建議已自動保守降級。"
-
-    # V2.8.0：把投資人真正需要的操作拆成六類，讓前台直接顯示，不必自行解讀技術指標。
-    position_status = (position or {}).get("status") if isinstance(position, dict) else None
-    entry_action = buy_status
-    add_action = add_status
-    if position_status is None:
-        hold_action = "未輸入持股"
-        reduce_action = "未輸入持股"
-    elif position_status == "STOP":
-        hold_action = "不續抱"
-        reduce_action = "停止減碼，改停損"
-    elif position_status == "REDUCE":
-        hold_action = "部分續抱"
-        reduce_action = "建議減碼"
-    else:
-        hold_action = "可以續抱" if not risk_warning else "謹慎續抱"
-        reduce_action = "暫不減碼"
-
-    take_profit_action = "等待停利區"
-    if c is not None and first_price is not None and c >= first_price:
-        take_profit_action = "分批停利"
-    if c is not None and main_price is not None and c >= main_price:
-        take_profit_action = "主要停利"
-
-    stop_action = "守停損線"
-    if risk_hit or position_status == "STOP":
-        stop_action = "執行停損"
-    elif risk_warning:
-        stop_action = "停損警戒"
-
-    primary_action = "等待"
-    if stop_action == "執行停損":
-        primary_action = "停損"
-    elif take_profit_action in ("分批停利", "主要停利") and position_status is not None:
-        primary_action = "停利"
-    elif reduce_action == "建議減碼":
-        primary_action = "減碼"
-    elif add_action in ("可以加碼", "小量加碼") and position_status is not None:
-        primary_action = "加碼"
-    elif hold_action in ("可以續抱", "謹慎續抱", "部分續抱") and position_status is not None:
-        primary_action = "續抱"
-    elif entry_action == "可以買":
-        primary_action = "進場"
-
-    six_actions = {
-        "entry": {"label": "進場", "status": entry_action},
-        "add": {"label": "加碼", "status": add_action},
-        "hold": {"label": "續抱", "status": hold_action},
-        "reduce": {"label": "減碼", "status": reduce_action},
-        "take_profit": {"label": "停利", "status": take_profit_action, "price": round(first_price, 2) if first_price is not None else None},
-        "stop_loss": {"label": "停損", "status": stop_action, "price": round(stop_price, 2) if stop_price is not None else None},
-    }
-
-    return {
-        "available": True,
-        "primary_action": primary_action,
-        "six_actions": six_actions,
-        "buy_status": buy_status,
-        "add_status": add_status,
-        "tomorrow_direction": direction,
-        "probabilities": {"up": round(up,1), "flat": round(_finite_float(probs.get("flat"),0.0),1), "down": round(down,1)},
-        "remaining_upside": {"low_pct": round(up_low,2), "high_pct": round(up_high,2), "label": space_label},
-        "take_profit": {
-            "first": _price_zone(first_price),
-            "main": _price_zone(main_price),
-            "extended": _price_zone(extended_price) if extended_price else None,
-        },
-        "risk": {
-            "warning_price": round(warning_price,2) if warning_price is not None else None,
-            "stop_price": round(stop_price,2) if stop_price is not None else None,
-        },
-        "risk_reward": round(rr,2) if rr is not None else None,
-        "confidence": confidence,
-        "model_health": health or "資料不足",
-        "reason": reason,
-        "data_warnings": aux_missing,
+        "volume_ratio_20": round(ratio, 2),
+        "price_change_pct": round(pct, 2),
+        "efficiency": round(efficiency, 3),
+        "status": status,
+        "score": score,
     }
 
 
@@ -2427,9 +1724,8 @@ def build_price_decision(latest, prev, df, strategy_pref="short"):
     # V2.1：量比統一以20日均量為主，並加入量價效率
     prev_close = float(prev["Close"]) if (prev is not None and prev["Close"] is not None) else None
     price_change_pct = ((close - prev_close) / prev_close * 100) if (close is not None and prev_close) else 0.0
-    volume_analysis = calculate_volume_metrics(volume, vol_ma20, price_change_pct, df=df)
-    # 自適應動能 >=55 視為至少沒有明顯量價拖累；歷史不足時函式會自行使用舊規則。
-    vol_ok = volume_analysis.get("score", 50) >= 55
+    volume_analysis = calculate_volume_metrics(volume, vol_ma20, price_change_pct)
+    vol_ok = volume_analysis["volume_ratio_20"] is not None and 0.7 <= volume_analysis["volume_ratio_20"] <= 2.5
 
     buy_score, buy_reasons = calculate_buy_score(
         ma20, ma60, close, ma5, kd_cross, k, macd_improving,
@@ -2490,6 +1786,784 @@ def build_price_decision(latest, prev, df, strategy_pref="short"):
 
 
 
+
+# ===========================================================================
+# V2.7.16 投資人決策融合層
+# ---------------------------------------------------------------------------
+# 前台只拿「答案／價位／風險／失效條件」；技術細節留在後台。
+# 注意：本層目前是規則型融合器，方向機率屬於「模型估計值」，不是統計保證。
+# ===========================================================================
+_STOCK_META_CACHE = {"ts": 0.0, "data": {}}
+
+
+def fetch_stock_meta(stock_id):
+    """低頻取得股票名稱／產業；結果記憶體快取24小時，FinMind磁碟快取仍會再保護配額。"""
+    now = time.time()
+    if now - _STOCK_META_CACHE.get("ts", 0) > 86400 or not _STOCK_META_CACHE.get("data"):
+        rows, err = finmind_get({"dataset": "TaiwanStockInfo"}, timeout=20)
+        if not err and rows:
+            data = {}
+            for r in rows:
+                sid = str(r.get("stock_id") or "").strip()
+                if sid:
+                    data[sid] = {
+                        "name": r.get("stock_name") or "",
+                        "industry": r.get("industry_category") or "",
+                        "market": r.get("type") or "",
+                    }
+            _STOCK_META_CACHE["ts"] = now
+            _STOCK_META_CACHE["data"] = data
+    return (_STOCK_META_CACHE.get("data") or {}).get(stock_id, {})
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+# ===========================================================================
+# V2.7.18 三核心模型：基本面／技術面／籌碼面
+# ---------------------------------------------------------------------------
+# 基本面再拆為：商業品質(護城河代理)／財務品質／估值與預期差。
+# 質化項目只做「代理分數」，且回傳 coverage / limitations，避免把推估當事實。
+# ===========================================================================
+_YF_FUND_CACHE = {}
+_YF_FUND_TTL = 6 * 3600
+_CHIP_MODEL_CACHE = {}
+_CHIP_MODEL_TTL = 3600
+
+
+def _num(v, default=None):
+    try:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _pct100(v):
+    """yfinance 多數比率為 0~1，轉百分點；已是百分數的大值則保留。"""
+    x = _num(v)
+    if x is None:
+        return None
+    return x * 100 if abs(x) <= 3 else x
+
+
+def _score_linear(v, bad, good, reverse=False):
+    if v is None:
+        return None
+    if good == bad:
+        return 50.0
+    x = (float(v) - bad) / (good - bad) * 100
+    x = _clamp(x, 0, 100)
+    return 100 - x if reverse else x
+
+
+def _statement_value(df, labels, pos=0):
+    try:
+        if df is None or df.empty or len(df.columns) <= pos:
+            return None
+        for label in labels:
+            if label in df.index:
+                return _num(df.loc[label].iloc[pos])
+    except Exception:
+        pass
+    return None
+
+
+def _growth(cur, prev):
+    cur, prev = _num(cur), _num(prev)
+    if cur is None or prev in (None, 0):
+        return None
+    return (cur - prev) / abs(prev) * 100
+
+
+def fetch_company_fundamentals(stock_id, meta=None):
+    """以 yfinance 低頻取得公司資料與三大報表；失敗時整體模型自動降級。"""
+    now = time.time()
+    cached = _YF_FUND_CACHE.get(stock_id)
+    if cached and now - cached[0] < _YF_FUND_TTL:
+        return cached[1]
+    result = {"available": False, "source": "Yahoo Finance/yfinance", "limitations": []}
+    try:
+        import yfinance as yf  # type: ignore
+        market = str((meta or {}).get("market") or "")
+        suffixes = [".TWO", ".TW"] if ("上櫃" in market or "OTC" in market.upper()) else [".TW", ".TWO"]
+        tk = None; info = {}
+        for suffix in suffixes:
+            try:
+                cand = yf.Ticker(str(stock_id) + suffix)
+                inf = cand.info or {}
+                if inf and (inf.get("regularMarketPrice") is not None or inf.get("marketCap") is not None or inf.get("longName")):
+                    tk, info = cand, inf
+                    break
+            except Exception:
+                continue
+        if tk is None:
+            raise RuntimeError("Yahoo Finance 查無公司資料")
+        try: fin = tk.financials
+        except Exception: fin = pd.DataFrame()
+        try: bal = tk.balance_sheet
+        except Exception: bal = pd.DataFrame()
+        try: cf = tk.cashflow
+        except Exception: cf = pd.DataFrame()
+
+        rev0 = _statement_value(fin, ["Total Revenue"], 0)
+        rev1 = _statement_value(fin, ["Total Revenue"], 1)
+        ni0 = _statement_value(fin, ["Net Income", "Net Income Common Stockholders"], 0)
+        ni1 = _statement_value(fin, ["Net Income", "Net Income Common Stockholders"], 1)
+        gp0 = _statement_value(fin, ["Gross Profit"], 0)
+        op0 = _statement_value(fin, ["Operating Income"], 0)
+        assets0 = _statement_value(bal, ["Total Assets"], 0)
+        debt0 = _statement_value(bal, ["Total Debt", "Total Liabilities Net Minority Interest"], 0)
+        ca0 = _statement_value(bal, ["Current Assets", "Total Current Assets"], 0)
+        cl0 = _statement_value(bal, ["Current Liabilities", "Total Current Liabilities"], 0)
+        ar0 = _statement_value(bal, ["Accounts Receivable", "Receivables"], 0)
+        ar1 = _statement_value(bal, ["Accounts Receivable", "Receivables"], 1)
+        inv0 = _statement_value(bal, ["Inventory"], 0)
+        inv1 = _statement_value(bal, ["Inventory"], 1)
+        ocf0 = _statement_value(cf, ["Operating Cash Flow", "Total Cash From Operating Activities"], 0)
+        capex0 = _statement_value(cf, ["Capital Expenditure", "Capital Expenditures"], 0)
+        fcf0 = _statement_value(cf, ["Free Cash Flow"], 0)
+        if fcf0 is None and ocf0 is not None and capex0 is not None:
+            fcf0 = ocf0 + capex0  # yfinance capex 常為負數
+
+        revenue_growth = _pct100(info.get("revenueGrowth"))
+        if revenue_growth is None: revenue_growth = _growth(rev0, rev1)
+        earnings_growth = _pct100(info.get("earningsGrowth"))
+        if earnings_growth is None: earnings_growth = _growth(ni0, ni1)
+        gross_margin = _pct100(info.get("grossMargins"))
+        if gross_margin is None and rev0: gross_margin = gp0 / rev0 * 100 if gp0 is not None else None
+        operating_margin = _pct100(info.get("operatingMargins"))
+        if operating_margin is None and rev0: operating_margin = op0 / rev0 * 100 if op0 is not None else None
+        profit_margin = _pct100(info.get("profitMargins"))
+        if profit_margin is None and rev0: profit_margin = ni0 / rev0 * 100 if ni0 is not None else None
+        roe = _pct100(info.get("returnOnEquity"))
+        current_ratio = _num(info.get("currentRatio"))
+        if current_ratio is None and cl0: current_ratio = ca0 / cl0 if ca0 is not None else None
+        debt_ratio = debt0 / assets0 * 100 if debt0 is not None and assets0 else None
+        cfo_ni = ocf0 / ni0 if ocf0 is not None and ni0 not in (None, 0) else None
+        fcf_margin = fcf0 / rev0 * 100 if fcf0 is not None and rev0 else None
+        ar_growth = _growth(ar0, ar1)
+        inv_growth = _growth(inv0, inv1)
+
+        result.update({
+            "available": True,
+            "ticker": getattr(tk, "ticker", None),
+            "name": info.get("longName") or info.get("shortName"),
+            "sector": info.get("sector"), "industry": info.get("industry"),
+            "business_summary": (info.get("longBusinessSummary") or "")[:1200],
+            "market_cap": _num(info.get("marketCap")),
+            "revenue_growth": revenue_growth, "earnings_growth": earnings_growth,
+            "gross_margin": gross_margin, "operating_margin": operating_margin,
+            "profit_margin": profit_margin, "roe": roe,
+            "free_cash_flow": _num(info.get("freeCashflow"), fcf0),
+            "operating_cash_flow": _num(info.get("operatingCashflow"), ocf0),
+            "cfo_to_net_income": cfo_ni, "fcf_margin": fcf_margin,
+            "debt_ratio": debt_ratio, "current_ratio": current_ratio,
+            "receivable_growth": ar_growth, "inventory_growth": inv_growth,
+            "trailing_pe": _num(info.get("trailingPE")), "forward_pe": _num(info.get("forwardPE")),
+            "price_to_book": _num(info.get("priceToBook")),
+            "dividend_yield": _pct100(info.get("dividendYield")),
+            "peg_ratio": _num(info.get("pegRatio")),
+            "target_mean_price": _num(info.get("targetMeanPrice")),
+            "analyst_count": int(_num(info.get("numberOfAnalystOpinions"), 0) or 0),
+            "recommendation_mean": _num(info.get("recommendationMean")),
+        })
+        if not result.get("business_summary"):
+            result["limitations"].append("公司商業模式文字資料不足")
+    except Exception as e:
+        result["limitations"].append(str(e)[:120])
+    _YF_FUND_CACHE[stock_id] = (now, result)
+    return result
+
+
+def build_financial_quality_model(raw, revenue_yoy=None):
+    """11 核心財務健康指標；缺值不硬補分，使用 coverage 告知可信度。"""
+    rg = raw.get("revenue_growth") if raw else None
+    if rg is None and revenue_yoy is not None: rg = float(revenue_yoy)
+    eg = raw.get("earnings_growth") if raw else None
+    gm = raw.get("gross_margin") if raw else None
+    om = raw.get("operating_margin") if raw else None
+    nm = raw.get("profit_margin") if raw else None
+    roe = raw.get("roe") if raw else None
+    fcfm = raw.get("fcf_margin") if raw else None
+    cfoni = raw.get("cfo_to_net_income") if raw else None
+    debt = raw.get("debt_ratio") if raw else None
+    cr = raw.get("current_ratio") if raw else None
+    ar = raw.get("receivable_growth") if raw else None
+    inv = raw.get("inventory_growth") if raw else None
+
+    working_score = None
+    if rg is not None and (ar is not None or inv is not None):
+        penalties=[]
+        if ar is not None: penalties.append(max(0, ar-rg))
+        if inv is not None: penalties.append(max(0, inv-rg))
+        working_score = _clamp(100 - (sum(penalties)/len(penalties) if penalties else 0)*2.5, 0, 100)
+
+    items = [
+        ("營收成長", rg, "%", _score_linear(rg, -10, 25)),
+        ("獲利/EPS成長", eg, "%", _score_linear(eg, -15, 30)),
+        ("毛利率", gm, "%", _score_linear(gm, 10, 45)),
+        ("營業利益率", om, "%", _score_linear(om, 3, 25)),
+        ("淨利率", nm, "%", _score_linear(nm, 2, 20)),
+        ("ROE", roe, "%", _score_linear(roe, 5, 20)),
+        ("自由現金流率", fcfm, "%", _score_linear(fcfm, -5, 15)),
+        ("營業現金流/淨利", cfoni, "x", _score_linear(cfoni, 0.5, 1.3)),
+        ("負債比", debt, "%", _score_linear(debt, 75, 25, reverse=True)),
+        ("流動比率", cr, "x", _score_linear(cr, 0.8, 2.0)),
+        ("存貨/應收異常", None if working_score is None else round(working_score,1), "分", working_score),
+    ]
+    out=[]; vals=[]; risks=[]; strengths=[]
+    for name,val,unit,sc in items:
+        state="資料不足" if sc is None else ("良好" if sc>=70 else "普通" if sc>=45 else "風險")
+        out.append({"name":name,"value":round(val,2) if isinstance(val,(int,float)) else val,"unit":unit,"score":round(sc,1) if sc is not None else None,"state":state})
+        if sc is not None:
+            vals.append(sc)
+            if sc < 40: risks.append(name+"偏弱")
+            elif sc >= 75: strengths.append(name+"良好")
+    score = sum(vals)/len(vals) if vals else 50
+    coverage = len(vals)/len(items)*100
+    label = "強健" if score>=75 else "偏強" if score>=62 else "中性" if score>=45 else "偏弱" if score>=30 else "高風險"
+    return {"score":round(score,1),"label":label,"coverage":round(coverage,1),"items":out,"strengths":strengths[:4],"risks":risks[:4]}
+
+
+def build_business_quality_model(raw, financial):
+    """商業模式/護城河代理：以可量化的定價力、獲利效率、現金創造與規模做代理。"""
+    comps=[]; reasons=[]; risks=[]
+    for key,label,bad,good in [
+        ("gross_margin","產品定價力/毛利",10,45),
+        ("operating_margin","營運效率",3,25),
+        ("roe","資本效率",5,20),
+        ("fcf_margin","現金創造",-5,15),
+    ]:
+        v=raw.get(key) if raw else None; sc=_score_linear(v,bad,good)
+        if sc is not None:
+            comps.append(sc)
+            (reasons if sc>=65 else risks if sc<40 else reasons).append(label+("佳" if sc>=65 else "普通" if sc>=40 else "弱"))
+    mc=raw.get("market_cap") if raw else None
+    if mc:
+        # 規模只給低權重，不把大公司直接等同護城河
+        scale=_clamp((math.log10(max(mc,1))-9)*20,0,100)
+        comps.append(scale*0.35+50*0.65)
+    score=sum(comps)/len(comps) if comps else 50
+    summary=(raw.get("business_summary") or "") if raw else ""
+    coverage=min(100, len(comps)/5*100 + (20 if summary else 0))
+    label="護城河代理偏強" if score>=70 else "商業品質偏強" if score>=60 else "商業品質中性" if score>=45 else "商業品質偏弱"
+    limitations=["護城河、客戶集中度、轉換成本屬質化項目；目前以財務表現與公開公司摘要做代理，不當作已知事實。"]
+    return {"score":round(score,1),"label":label,"coverage":round(min(100,coverage),1),"summary":summary[:360],"reasons":reasons[:4],"risks":risks[:3],"limitations":limitations}
+
+
+def build_valuation_expectation_model(raw, valuation, current_price):
+    pe = raw.get("trailing_pe") if raw else None
+    fpe = raw.get("forward_pe") if raw else None
+    pb = raw.get("price_to_book") if raw else None
+    dy = raw.get("dividend_yield") if raw else None
+    target = raw.get("target_mean_price") if raw else None
+    growth = raw.get("earnings_growth") if raw else None
+    hist_avg = _num((valuation or {}).get("pe_avg")) if valuation and not valuation.get("_error") else None
+    comps=[]; notes=[]; risks=[]
+    if pe is not None:
+        if hist_avg and hist_avg>0:
+            rel=(pe/hist_avg-1)*100
+            sc=_score_linear(rel,40,-25)  # 越低於歷史均值越好
+            comps.append(sc); notes.append(f"本益比相對歷史均值 {rel:+.1f}%")
+        else:
+            comps.append(_score_linear(pe,35,12,reverse=False))
+    if pb is not None:
+        comps.append(_score_linear(pb,6,1,reverse=False))
+    if growth is not None and pe is not None and growth>0:
+        peg_proxy=pe/max(growth,1)
+        comps.append(_score_linear(peg_proxy,2.5,0.8,reverse=False)); notes.append(f"成長/估值代理 PEG {peg_proxy:.2f}")
+    consensus_upside=None
+    if target and current_price:
+        consensus_upside=(target/current_price-1)*100
+        comps.append(_score_linear(consensus_upside,-15,25)); notes.append(f"分析師共識目標價空間 {consensus_upside:+.1f}%")
+    score=sum(comps)/len(comps) if comps else 50
+    # 預期差：成長能力 vs 估值壓力；不是保證，也不是完整 DCF
+    valuation_pressure=0
+    if pe and hist_avg and hist_avg>0: valuation_pressure=(pe/hist_avg-1)*100
+    gap=None
+    if growth is not None: gap=growth - max(0, valuation_pressure)
+    gap_label="資料不足"
+    if gap is not None: gap_label="正向預期差" if gap>=10 else "中性" if gap>-5 else "負向預期差"
+    if score<40: risks.append("目前估值/市場預期偏高")
+    label="偏低估" if score>=72 else "合理偏低" if score>=60 else "合理" if score>=45 else "偏高估" if score>=30 else "高估風險"
+    return {"score":round(score,1),"label":label,"pe":pe,"forward_pe":fpe,"pb":pb,"dividend_yield":dy,
+            "historical_pe_avg":hist_avg,"consensus_target":target,"consensus_upside_pct":round(consensus_upside,1) if consensus_upside is not None else None,
+            "expectation_gap":round(gap,1) if gap is not None else None,"expectation_gap_label":gap_label,"notes":notes[:4],"risks":risks}
+
+
+def build_fundamental_model(stock_id, meta, revenue_yoy, valuation, current_price):
+    raw=fetch_company_fundamentals(stock_id,meta)
+    financial=build_financial_quality_model(raw,revenue_yoy)
+    business=build_business_quality_model(raw,financial)
+    val=build_valuation_expectation_model(raw,valuation,current_price)
+    # 公司基本面：財務 45%、商業品質 30%、估值預期差 25%
+    company_score=financial["score"]*.45+business["score"]*.30+val["score"]*.25
+    # 總體/產業代理層：目前不虛構總經與產業需求，使用可觀測代理，並清楚標示
+    macro_score=50.0
+    industry_proxy=_clamp((financial["score"]*.45+business["score"]*.35+50*.20),0,100)
+    composite=company_score*.75+industry_proxy*.15+macro_score*.10
+    label="偏強" if composite>=65 else "中性偏強" if composite>=55 else "中性" if composite>=45 else "偏弱"
+    return {"score":round(composite,1),"label":label,"business":business,"financial":financial,"valuation_expectation":val,
+            "macro":{"score":macro_score,"label":"中性（待市場層融合）","note":"總體經濟由市場環境/匯率/利率模組另行融合，不用缺資料硬猜。"},
+            "industry":{"score":round(industry_proxy,1),"label":"產業/公司動能代理","industry":(meta or {}).get("industry") or raw.get("industry"),"note":"產業生命週期與波特五力需可靠產業資料；目前只以公司/產業公開資訊做代理並標示限制。"},
+            "raw_source":raw.get("source"),"data_available":raw.get("available",False),"limitations":raw.get("limitations",[])}
+
+
+def fetch_chip_model(stock_id):
+    now=time.time(); c=_CHIP_MODEL_CACHE.get(stock_id)
+    if c and now-c[0]<_CHIP_MODEL_TTL: return c[1]
+    end=datetime.now().strftime("%Y-%m-%d"); start=(datetime.now()-timedelta(days=45)).strftime("%Y-%m-%d")
+    inst, e1=finmind_get({"dataset":"TaiwanStockInstitutionalInvestorsBuySell","data_id":stock_id,"start_date":start,"end_date":end},timeout=20)
+    margin, e2=finmind_get({"dataset":"TaiwanStockMarginPurchaseShortSale","data_id":stock_id,"start_date":start,"end_date":end},timeout=20)
+    bydate={}
+    for r in inst or []:
+        d=r.get("date"); name=str(r.get("name") or "").lower(); net=_num(r.get("buy"),0)-_num(r.get("sell"),0)
+        rec=bydate.setdefault(d,{"foreign":0,"trust":0,"dealer":0,"total":0})
+        if "foreign" in name: rec["foreign"]+=net
+        elif "investment" in name: rec["trust"]+=net
+        elif "dealer" in name: rec["dealer"]+=net
+        rec["total"]+=net
+    dates=sorted(bydate)
+    def sumlast(key,n): return sum(bydate[d][key] for d in dates[-n:]) if dates else 0
+    def streak(key):
+        if not dates:return 0
+        sign=1 if bydate[dates[-1]][key]>0 else -1 if bydate[dates[-1]][key]<0 else 0
+        if sign==0:return 0
+        n=0
+        for d in reversed(dates):
+            v=bydate[d][key]
+            if (v>0 and sign>0) or (v<0 and sign<0): n+=1
+            else: break
+        return n*sign
+    latest_margin=(margin or [])[-1] if margin else {}
+    old_margin=(margin or [])[-6] if len(margin or [])>=6 else ((margin or [None])[0] if margin else None)
+    mb=_num(latest_margin.get("MarginPurchaseTodayBalance")) if latest_margin else None
+    mbo=_num(old_margin.get("MarginPurchaseTodayBalance")) if old_margin else None
+    margin_chg=(mb/mbo-1)*100 if mb is not None and mbo not in (None,0) else None
+    factors=[]
+    total5=sumlast("total",5); total20=sumlast("total",20); f5=sumlast("foreign",5); t5=sumlast("trust",5)
+    # 以方向/連續性為主，不用絕對張數偏袒大型股
+    factors.append(65 if total5>0 else 35 if total5<0 else 50)
+    factors.append(68 if f5>0 else 32 if f5<0 else 50)
+    factors.append(72 if t5>0 else 30 if t5<0 else 50)
+    fs=streak("foreign"); ts=streak("trust")
+    factors.append(_clamp(50+fs*6,20,80)); factors.append(_clamp(50+ts*7,20,85))
+    if margin_chg is not None: factors.append(_clamp(55-margin_chg*2,25,75)) # 融資暴增視為較高風險
+    score=sum(factors)/len(factors) if factors else 50
+    label="資金明顯偏多" if score>=68 else "籌碼偏多" if score>=58 else "中性" if score>=43 else "籌碼偏空" if score>=32 else "資金明顯偏空"
+    out={"score":round(score,1),"label":label,"latest_date":dates[-1] if dates else None,
+         "institutional":{"total_5d":round(total5/1000),"total_20d":round(total20/1000),"foreign_5d":round(f5/1000),"trust_5d":round(t5/1000),"foreign_streak":fs,"trust_streak":ts},
+         "margin":{"balance":mb,"change_5d_pct":round(margin_chg,2) if margin_chg is not None else None},
+         "large_holder":{"available":False,"note":"千張大戶/主力分點需穩定授權資料源；未取得時不納入分數，不以猜測補值。"},
+         "coverage":round((5+(1 if margin_chg is not None else 0))/7*100,1),"raw":{"inst":inst or [],"margin":margin or []},"errors":[x for x in [e1,e2] if x]}
+    _CHIP_MODEL_CACHE[stock_id]=(now,out); return out
+
+
+def build_technical_core_model(latest, decision, score_pct, kd_cross):
+    base=_num(score_pct,50)
+    vp=_num(((decision or {}).get("volume_analysis") or {}).get("score"),50)
+    conf=_num(((decision or {}).get("confidence") or {}).get("score"),50)
+    score=_clamp(base*.55+vp*.25+conf*.20,0,100)
+    label="多頭" if score>=68 else "偏多" if score>=58 else "中性" if score>=43 else "偏空" if score>=32 else "空頭"
+    return {"score":round(score,1),"label":label,"trend_score":round(base,1),"volume_price_score":round(vp,1),"signal_confidence":round(conf,1),"kd":kd_cross,"volume_status":(decision or {}).get("volume_status")}
+
+
+def build_three_core_model(fundamental, technical, chip, strategy_pref="short"):
+    fs=_num((fundamental or {}).get("score"),50); ts=_num((technical or {}).get("score"),50); cs=_num((chip or {}).get("score"),50)
+    if strategy_pref=="mid": weights={"fundamental":.45,"technical":.30,"chip":.25}
+    else: weights={"fundamental":.25,"technical":.40,"chip":.35}
+    score=fs*weights["fundamental"]+ts*weights["technical"]+cs*weights["chip"]
+    label="三面共振偏多" if score>=67 and ts>=55 and cs>=50 else "偏多" if score>=58 else "中性" if score>=43 else "偏空" if score>=33 else "三面共振偏空"
+    conflicts=[]
+    if max(fs,ts,cs)-min(fs,ts,cs)>=30: conflicts.append("基本／技術／籌碼分歧較大，降低決策信心")
+    return {"score":round(score,1),"label":label,"weights":weights,"fundamental":round(fs,1),"technical":round(ts,1),"chip":round(cs,1),"conflicts":conflicts}
+
+
+def apply_three_core_guard(v27, core):
+    """三核心只做風控/信心修正，不以單一分數硬取代停損等高優先決策。"""
+    if not isinstance(v27,dict) or not isinstance(core,dict): return v27
+    dec=v27.get("decision") or {}; cash=dec.get("cash") or {}; holder=dec.get("holder") or {}; risks=dec.setdefault("risks",[])
+    if core.get("conflicts"):
+        risks.extend([x for x in core["conflicts"] if x not in risks])
+    if core.get("technical",50)<40 or core.get("chip",50)<35:
+        if cash.get("action")=="BUY": cash.update({"action":"WAIT","label":"等待"}); risks.append("技術或籌碼未通過進場門檻")
+    if core.get("fundamental",50)<32:
+        risks.append("公司基本面模型偏弱，中期風險升高")
+    if core.get("score",50)<42 and holder.get("action")=="ADD":
+        holder.update({"action":"HOLD","label":"續抱／停止加碼"}); risks.append("三核心綜合未通過加碼門檻")
+    dec["cash"]=cash; dec["holder"]=holder; v27["decision"]=dec; v27["three_core"]=core
+    return v27
+
+
+def apply_v28_stability_gate(v28, core):
+    """V2.8 正式上線門檻：主動進場/加碼必須同時通過資料、方向與三核心一致性。
+
+    風控只會把積極動作降級，不會覆寫已觸發的停損/減碼等高優先決策。
+    """
+    if not isinstance(v28, dict):
+        return v28
+    dec = v28.get("decision") or {}
+    cash = dec.get("cash") or {}
+    holder = dec.get("holder") or {}
+    direction = v28.get("direction") or {}
+    dq = v28.get("data_quality") or {}
+    risks = dec.setdefault("risks", [])
+
+    dq_score = _num(dq.get("score"), 0)
+    conf = _num(direction.get("confidence"), 0)
+    up = _num(direction.get("up_probability"), 0)
+    core_score = _num((core or {}).get("score"), 50)
+    tech = _num((core or {}).get("technical"), 50)
+    chip = _num((core or {}).get("chip"), 50)
+
+    gates = {
+        "data_quality": dq_score >= 70,
+        "direction_confidence": conf >= 70,
+        "upside_probability": up >= 58,
+        "three_core": core_score >= 58,
+        "technical": tech >= 55,
+        "chip": chip >= 50,
+    }
+    passed = all(gates.values())
+
+    if cash.get("action") == "BUY" and not passed:
+        cash.update({"action": "WAIT", "label": "等待"})
+        failed = [k for k, ok in gates.items() if not ok]
+        name_map = {
+            "data_quality": "資料品質",
+            "direction_confidence": "方向信心",
+            "upside_probability": "上漲機率",
+            "three_core": "三核心綜合",
+            "technical": "技術面",
+            "chip": "籌碼面",
+        }
+        risks.append("V2.8 主動進場門檻未全部通過：" + "、".join(name_map[x] for x in failed))
+
+    if holder.get("action") == "ADD" and not passed:
+        holder.update({"action": "HOLD", "label": "續抱／停止加碼"})
+        risks.append("V2.8 加碼門檻未全部通過")
+
+    # 去重並限制前台風險訊息長度
+    dec["risks"] = list(dict.fromkeys(risks))[:6]
+    dec["cash"] = cash
+    dec["holder"] = holder
+    v28["decision"] = dec
+    v28["stability_gate"] = {
+        "passed": passed,
+        "gates": gates,
+        "release_stage": RELEASE_STAGE,
+        "note": "主動進場/加碼需同時通過資料品質、方向信心與三核心門檻；未通過時自動降級。",
+    }
+    return v28
+
+
+def taiwan_tick_size(price):
+    """台股一般股票常用升降單位（ETF等商品可能另有規則；此處用於一般個股價位顯示）。"""
+    p = float(price or 0)
+    if p < 10: return 0.01
+    if p < 50: return 0.05
+    if p < 100: return 0.1
+    if p < 500: return 0.5
+    if p < 1000: return 1.0
+    return 5.0
+
+
+def round_to_tick(price):
+    if price is None:
+        return None
+    tick = taiwan_tick_size(price)
+    return round(round(float(price) / tick) * tick, 2)
+
+
+def _floor_to_tick(price):
+    """向下取到合法台股升降單位；用於漲停價，避免超過 +10%。"""
+    if price is None:
+        return None
+    import math
+    tick = taiwan_tick_size(price)
+    return round(math.floor((float(price) + 1e-12) / tick) * tick, 2)
+
+
+def _ceil_to_tick(price):
+    """向上取到合法台股升降單位；用於跌停價，避免超過 -10%。"""
+    if price is None:
+        return None
+    import math
+    tick = taiwan_tick_size(price)
+    return round(math.ceil((float(price) - 1e-12) / tick) * tick, 2)
+
+
+def taiwan_daily_price_limits(reference_price):
+    """
+    一般台股個股每日漲跌幅 ±10%。
+    reference_price 應優先使用交易所當日開盤競價基準；目前日線資料沒有獨立欄位時，
+    一般交易日以最近一日收盤價作估算基準。除權息、初上市等特殊交易日需以交易所基準價為準。
+    """
+    if reference_price is None or float(reference_price) <= 0:
+        return {"reference": None, "limit_up": None, "limit_down": None, "estimated": True}
+    ref = float(reference_price)
+    return {
+        "reference": round_to_tick(ref),
+        "limit_up": _floor_to_tick(ref * 1.10),
+        "limit_down": _ceil_to_tick(ref * 0.90),
+        "estimated": True,
+    }
+
+
+def _clip_price_to_limits(price, limits):
+    if price is None:
+        return None
+    lo = (limits or {}).get("limit_down")
+    hi = (limits or {}).get("limit_up")
+    p = float(price)
+    if lo is not None: p = max(p, float(lo))
+    if hi is not None: p = min(p, float(hi))
+    return round_to_tick(p)
+
+
+def classify_market_regime(close, ma20, ma60, atr14):
+    if close is None:
+        return {"code": "UNKNOWN", "label": "資料不足", "volatility": "未知"}
+    atr_pct = (float(atr14) / float(close) * 100) if atr14 and close else None
+    high_vol = atr_pct is not None and atr_pct >= 3.5
+    if ma20 is not None and ma60 is not None:
+        if close > ma20 > ma60:
+            label = "多頭高波動" if high_vol else "多頭趨勢"
+            code = "BULL_HIGH_VOL" if high_vol else "BULL"
+        elif close < ma20 < ma60:
+            label = "空頭高波動" if high_vol else "空頭趨勢"
+            code = "BEAR_HIGH_VOL" if high_vol else "BEAR"
+        else:
+            label, code = "區間震盪", "RANGE"
+    else:
+        label, code = "區間震盪", "RANGE"
+    return {
+        "code": code,
+        "label": label,
+        "atr_pct": round(atr_pct, 2) if atr_pct is not None else None,
+        "volatility": "高" if high_vol else "一般",
+    }
+
+
+def build_data_quality(df, latest, weekly_kd=None, revenue_yoy=None, valuation=None, meta=None):
+    score = 0
+    notes = []
+    rows = len(df)
+    if rows >= 250:
+        score += 35
+    elif rows >= 120:
+        score += 25; notes.append("歷史資料未滿250個交易日")
+    else:
+        score += 15; notes.append("歷史樣本偏少")
+
+    critical = [latest.get("Close"), latest.get("MA20"), latest.get("K"), latest.get("D"), latest.get("ATR14")]
+    critical_ok = sum(x is not None and not pd.isna(x) for x in critical)
+    score += round(25 * critical_ok / len(critical))
+    if critical_ok < len(critical): notes.append("部分核心技術欄位缺失")
+
+    if latest.get("Volume") is not None and latest.get("Vol_MA20") is not None:
+        score += 15
+    else:
+        notes.append("成交量資料不足")
+    if weekly_kd: score += 10
+    else: notes.append("週期資料不足")
+    if revenue_yoy is not None: score += 5
+    if valuation and not valuation.get("_error"): score += 5
+    if meta and meta.get("name"): score += 5
+
+    score = int(_clamp(score, 0, 100))
+    if score >= 85: grade, state = "A", "正常"
+    elif score >= 70: grade, state = "B", "輕度降級"
+    elif score >= 55: grade, state = "C", "嚴重降級"
+    else: grade, state = "D", "禁止主動交易判斷"
+    return {"score": score, "grade": grade, "state": state, "notes": notes[:4]}
+
+
+def estimate_direction_v27(score_pct, volume_analysis, regime, kd_cross, macd_hist, macd_hist_prev, no_trade_reasons, data_quality):
+    """規則融合的方向估計；三分類總和=100。之後可由Walk-forward校準層替換。"""
+    edge = (float(score_pct or 50) - 50) * 0.55
+    vscore = (volume_analysis or {}).get("score", 50)
+    edge += (float(vscore) - 50) * 0.18
+    rcode = (regime or {}).get("code")
+    if rcode in ("BULL", "BULL_HIGH_VOL"): edge += 7
+    elif rcode in ("BEAR", "BEAR_HIGH_VOL"): edge -= 7
+    if kd_cross == "黃金交叉": edge += 4
+    elif kd_cross == "死亡交叉": edge -= 4
+    if macd_hist is not None and macd_hist_prev is not None:
+        edge += 3 if macd_hist > macd_hist_prev else -3
+    if no_trade_reasons: edge -= min(12, 4 * len(no_trade_reasons))
+
+    # 資料品質愈低，機率往中性收斂，避免假性高信心。
+    dq = float((data_quality or {}).get("score", 50))
+    shrink = _clamp((dq - 45) / 55, 0.15, 1.0)
+    edge *= shrink
+
+    sideways = 24.0
+    if abs(edge) < 8: sideways = 38.0
+    elif abs(edge) < 15: sideways = 30.0
+    if rcode == "RANGE": sideways += 7
+    sideways = _clamp(sideways, 18, 52)
+    directional = 100 - sideways
+    up = directional / 2 + edge
+    down = directional - up
+    up = _clamp(up, 8, 84)
+    down = _clamp(down, 8, 84)
+    # 重新正規化
+    total = up + down + sideways
+    up, down, sideways = [round(x / total * 100, 1) for x in (up, down, sideways)]
+    drift = round(100 - up - down - sideways, 1)
+    sideways = round(sideways + drift, 1)
+
+    if up >= 58: label = "偏多"
+    elif down >= 58: label = "偏空"
+    elif up >= down + 8: label = "震盪偏多"
+    elif down >= up + 8: label = "震盪偏空"
+    else: label = "震盪"
+
+    consistency = 100 - min(45, abs(float(score_pct or 50) - float(vscore)))
+    confidence = int(_clamp(0.55 * dq + 0.45 * consistency, 0, 100))
+    return {
+        "label": label,
+        "up_probability": up,
+        "sideways_probability": sideways,
+        "down_probability": down,
+        "confidence": confidence,
+        "probability_type": "規則融合估計",
+        "calibration_status": "等待更多Walk-forward樣本後進行統計校準",
+    }
+
+
+def build_v27_price_plan(close, decision, reference_price=None):
+    pdx = (decision or {}).get("price_decision") or {}
+    buy = pdx.get("buy") or {}
+    add = pdx.get("add") or {}
+    risk = pdx.get("risk") or {}
+    profit = pdx.get("profit") or {}
+    limits = taiwan_daily_price_limits(reference_price if reference_price is not None else close)
+    entry_low = _clip_price_to_limits(buy.get("zone_low"), limits)
+    entry_high = _clip_price_to_limits(buy.get("zone_high"), limits)
+    add_low = _clip_price_to_limits(add.get("low"), limits)
+    add_high = _clip_price_to_limits(add.get("high"), limits)
+    stop = _clip_price_to_limits(risk.get("stop"), limits)
+    defense = _clip_price_to_limits(risk.get("warning"), limits)
+    t1 = _clip_price_to_limits(profit.get("target1"), limits)
+    t2 = _clip_price_to_limits(profit.get("target2"), limits)
+    remain1 = ((t1 / close - 1) * 100) if (close and t1 and t1 > close) else None
+    remain2 = ((t2 / close - 1) * 100) if (close and t2 and t2 > close) else None
+    positives = [x for x in (remain1, remain2) if x is not None and x > 0]
+    remain = None
+    if positives:
+        remain = {"low": round(min(positives), 1), "high": round(max(positives), 1)}
+    rr = calculate_risk_reward(close, stop, t1 or t2) if close and stop and (t1 or t2) else None
+    return {
+        "entry_zone": {"low": entry_low, "high": entry_high},
+        "add_zone": {"low": add_low, "high": add_high, "type": add.get("type"), "note": add.get("note")},
+        "defense": defense,
+        "stop_loss": stop,
+        "target_1": t1,
+        "target_2": t2,
+        "remaining_upside_pct": remain,
+        "risk_reward": rr,
+        "daily_limits": limits,
+    }
+
+
+def fuse_v27_decision(decision, position, direction, price_plan, data_quality, regime):
+    no_trade = list((decision or {}).get("no_trade_reasons") or [])
+    dq = (data_quality or {}).get("score", 0)
+    # 空手策略
+    action = (decision or {}).get("action") or "WAIT"
+    if dq < 55:
+        cash_action = "WAIT"; cash_label = "等待"
+        no_trade.append("核心資料品質不足，禁止主動進場")
+    elif no_trade:
+        cash_action = "WAIT"; cash_label = "等待"
+    elif action == "BUY" and direction.get("up_probability", 0) >= 55:
+        cash_action = "BUY"; cash_label = "進場"
+    else:
+        cash_action = "WAIT"; cash_label = "等待"
+
+    # 持股策略：有成本資料時沿用風險優先裁決；未輸入時只提供市場狀態，不假裝知道個人成本。
+    if position:
+        pa = position.get("final_action") or position.get("status") or "HOLD"
+        pmap = {"STOP":"停損", "REDUCE":"減碼／停利", "HOLD":"續抱", "ADD":"加碼", "WAIT":"等待", "NO_TRADE":"停止加碼"}
+        holder_action = pa
+        holder_label = pmap.get(pa, "續抱")
+    else:
+        holder_action = "UNSET"
+        holder_label = "請輸入持股成本"
+
+    add_obj = ((decision or {}).get("price_decision") or {}).get("add") or {}
+    add_allowed = dq >= 70 and not no_trade and add_obj.get("type") in ("PULLBACK", "BREAKOUT", "TREND")
+    add_state = "可評估加碼" if add_allowed else "停止加碼"
+
+    # 風險/理由/失效條件精簡成投資人可讀文案
+    reasons = []
+    if direction.get("label"): reasons.append("明日方向「%s」" % direction["label"])
+    vstat = (decision or {}).get("volume_status")
+    if vstat: reasons.append("量價：%s" % vstat)
+    if regime and regime.get("label"): reasons.append("市場結構：%s" % regime["label"])
+    reasons.extend(((decision or {}).get("reasons") or [])[:2])
+    # 去重
+    reasons = list(dict.fromkeys(reasons))[:4]
+
+    risks = list(no_trade)
+    if direction.get("confidence", 0) < 70: risks.append("目前模型信心未達高可信門檻")
+    if (data_quality or {}).get("state") != "正常": risks.append("資料品質為%s" % (data_quality or {}).get("state"))
+    risks = list(dict.fromkeys(risks))[:4]
+
+    invalidation = None
+    if price_plan.get("stop_loss") is not None:
+        invalidation = "跌破 %s 且無法快速收復，原判斷失效" % price_plan["stop_loss"]
+    elif price_plan.get("defense") is not None:
+        invalidation = "跌破防守位 %s 後重新評估" % price_plan["defense"]
+
+    return {
+        "cash": {"action": cash_action, "label": cash_label},
+        "holder": {"action": holder_action, "label": holder_label},
+        "add_state": add_state,
+        "reasons": reasons,
+        "risks": risks,
+        "invalidation": invalidation,
+    }
+
+
+def build_v27_analysis(df, latest, prev, score_pct, decision, position, weekly_kd, revenue_yoy, valuation, meta, kd_cross):
+    close = float(latest["Close"])
+    ma20 = float(latest["MA20"]) if latest["MA20"] is not None else None
+    ma60 = float(latest["MA60"]) if latest["MA60"] is not None else None
+    atr14 = float(latest["ATR14"]) if latest["ATR14"] is not None else None
+    regime = classify_market_regime(close, ma20, ma60, atr14)
+    dq = build_data_quality(df, latest, weekly_kd, revenue_yoy, valuation, meta)
+    direction = estimate_direction_v27(
+        score_pct,
+        (decision or {}).get("volume_analysis") or {},
+        regime,
+        kd_cross,
+        float(latest["MACD_Hist"]) if latest["MACD_Hist"] is not None else None,
+        float(prev["MACD_Hist"]) if prev is not None and prev["MACD_Hist"] is not None else None,
+        (decision or {}).get("no_trade_reasons") or [],
+        dq,
+    )
+    reference_price = float(prev["Close"]) if prev is not None and prev["Close"] is not None else close
+    plan = build_v27_price_plan(close, decision, reference_price=reference_price)
+    fused = fuse_v27_decision(decision, position, direction, plan, dq, regime)
+    return {
+        "system_version": SYSTEM_VERSION,
+        "model_version": MODEL_VERSION,
+        "release_stage": RELEASE_STAGE,
+        "data_quality": dq,
+        "market_regime": regime,
+        "direction": direction,
+        "price_plan": plan,
+        "decision": fused,
+        "front_end_principle": "前台給答案；後台負責運算",
+    }
+
+
 # ===========================================================================
 # /api/stock — 個股健診主端點（後端計算技術指標）
 # 從 FinMind 抓股價 → pandas 算指標 → 回傳 JSON
@@ -2504,12 +2578,11 @@ def get_stock_data():
     if not stock_id.isdigit():
         return jsonify({"status": 400, "msg": "請輸入數字股票代號"}), 400
 
-    # --- Step 1: V2.6.0 先驗證股票身分，避免只顯示數字代號造成誤查 ---
-    ident = fetch_stock_identity(stock_id)
-    stock_name = ident.get("name", "")
-    industry = ident.get("industry", "")
-    market_name = ident.get("market", "台股")
-    # 身分清單偶爾可能因資料源暫時不可用而空白；若股價存在仍允許分析，前端會標示待確認。
+    # --- Step 1: 股票名稱／產業低頻快取查詢 ---
+    # V2.7.16：數字代號也必須顯示名稱，避免輸入錯股；TaiwanStockInfo 由快取保護配額。
+    meta = fetch_stock_meta(stock_id)
+    stock_name = meta.get("name", "")
+    industry = meta.get("industry", "")
 
     # --- Step 2: 從 FinMind 抓股價（拉長區間以利週KD計算）---
     end_date = datetime.now().strftime("%Y-%m-%d")
@@ -2613,9 +2686,6 @@ def get_stock_data():
     avg_vol5 = float(latest["Vol_MA5"]) if latest["Vol_MA5"] is not None else 0
     avg_vol20 = float(latest["Vol_MA20"]) if latest["Vol_MA20"] is not None else 0
     vol_ratio = last_vol / avg_vol20 if avg_vol20 > 0 else 1.0
-    prev_close_for_vol = float(prev["Close"]) if (prev is not None and prev["Close"] is not None) else None
-    vol_price_change = ((float(latest["Close"]) - prev_close_for_vol) / prev_close_for_vol * 100) if prev_close_for_vol else 0.0
-    adaptive_volume = calculate_volume_metrics(last_vol, avg_vol20, vol_price_change, df=df)
 
     # --- 技術面評分 ---
     # 設計說明：
@@ -2676,11 +2746,10 @@ def get_stock_data():
     else:
         score_max += 1
 
-    # V2.6.3：成交量採個股歷史百分位動能，並由前端明日作戰卡共同使用。
-    if adaptive_volume.get("score", 50) >= 70:
+    if vol_ratio > 1.5:
         score += 1
         score_max += 1
-    elif adaptive_volume.get("score", 50) <= 35:
+    elif vol_ratio < 0.5:
         score -= 1
         score_max += 1
     else:
@@ -2714,11 +2783,17 @@ def get_stock_data():
     except Exception:
         valuation = None
 
-    # --- V2.5.4 基本面財報：EPS / 獲利能力 ---
+    # --- V2.7.18 基本面完整模型：商業模式/護城河代理 + 11指標財務品質 + 估值預期差 ---
     try:
-        financial = fetch_financial_summary(stock_id)
-    except Exception:
-        financial = {"available": False, "message": "財報資料暫時無法取得"}
+        fundamental_model = build_fundamental_model(stock_id, meta, revenue_yoy, valuation, float(latest["Close"]))
+    except Exception as e:
+        fundamental_model = {"score": 50, "label": "資料不足", "error": str(e)[:120]}
+
+    # --- V2.7.18 籌碼模型：法人連續性 + 5/20日資金 + 融資變化 ---
+    try:
+        chip_model = fetch_chip_model(stock_id)
+    except Exception as e:
+        chip_model = {"score": 50, "label": "資料不足", "coverage": 0, "raw": {"inst": [], "margin": []}, "errors": [str(e)[:120]]}
 
     # --- V2.1 價格決策引擎（支撐/壓力聚集、核心買賣點±1%、禁止交易、補倉、動態停損停利、信心度）---
     strategy_pref = request.args.get("strategy_pref", "short").strip()
@@ -2737,26 +2812,6 @@ def get_stock_data():
             )
     except Exception:
         decision = None
-
-    # --- V2.7.0 正式收盤後量化模型：三方向機率 + 剩餘獲利空間 ---
-    quant_model = {"available": False, "reason": "模型尚未計算"}
-    remaining_upside = {"available": False, "reason": "模型尚未計算"}
-    try:
-        quant_model = predict_tomorrow_direction(df)
-        resistance_pct = None
-        if decision is not None:
-            internal_q = decision.get("_internal") or {}
-            resistance_q = internal_q.get("resistance") or {}
-            resistance_price_q = _finite_float(resistance_q.get("core"))
-            if resistance_price_q is not None and float(latest["Close"]) > 0:
-                resistance_pct = max(0.0, (resistance_price_q / float(latest["Close"]) - 1.0) * 100.0)
-        remaining_upside = estimate_remaining_upside(
-            quant_model, resistance_core=resistance_pct, close=float(latest["Close"])
-        )
-        quant_model["remaining_upside"] = remaining_upside
-    except Exception as exc:
-        quant_model = {"available": False, "reason": f"模型計算失敗: {type(exc).__name__}"}
-        remaining_upside = {"available": False, "reason": "模型計算失敗"}
 
     # --- 持股價格即時分析（選填，不存檔，當下輸入當下算）---
     # 用 Exception 而非只抓 ValueError/TypeError，確保這個選填功能萬一
@@ -2817,27 +2872,36 @@ def get_stock_data():
         except Exception:
             position = None
 
-    # --- 正式五答案：模型 + 風險/停利 + 持股狀態，資料缺失採保守降級 ---
-    aux_missing = []
-    if revenue_yoy is None:
-        aux_missing.append("營收")
-    if not isinstance(financial, dict) or not financial.get("available"):
-        aux_missing.append("財報")
-    investor_decision = build_investor_decision(
-        quant_model, remaining_upside, decision, float(latest["Close"]),
-        position=position, aux_missing=aux_missing
-    )
+    # --- V2.8.0 正式穩定決策融合層：作戰卡只吃這一份輸出 ---
+    try:
+        v27 = build_v27_analysis(
+            df, latest, prev, score_pct, decision, position, weekly_kd, revenue_yoy, valuation, meta, kd_cross
+        )
+        technical_core = build_technical_core_model(latest, decision, score_pct, kd_cross)
+        three_core = build_three_core_model(fundamental_model, technical_core, chip_model, strategy_pref)
+        v27 = apply_three_core_guard(v27, three_core)
+        v27 = apply_v28_stability_gate(v27, three_core)
+    except Exception as e:
+        technical_core = {"score": score_pct, "label": "資料不足"}
+        three_core = None
+        v27 = {
+            "system_version": SYSTEM_VERSION,
+            "model_version": MODEL_VERSION,
+            "error": "V2.8決策融合暫時無法計算",
+            "detail": str(e)[:160],
+        }
 
     if decision is not None and "_internal" in decision:
         del decision["_internal"]  # 內部欄位，不需要回傳給前端
 
     result = {
         "status": 200,
+        "system_version": SYSTEM_VERSION,
+        "release_stage": RELEASE_STAGE,
+        "model_version": MODEL_VERSION,
         "symbol": stock_id,
         "name": stock_name,
         "industry": industry,
-        "market": market_name,
-        "identity_verified": bool(stock_name),
         "date": latest["Date"],
         "close": round(float(latest["Close"]), 2),
         "prev_close": round(prev_close, 2) if prev_close is not None else None,
@@ -2875,12 +2939,7 @@ def get_stock_data():
             "ratio_basis": "20日均量",
             "price_change_pct": round(price_change_pct or 0, 2),
             "efficiency": decision.get("volume_price_efficiency") if decision else None,
-            "status": decision.get("volume_status") if decision else adaptive_volume.get("status", "資料不足"),
-            "mode": (decision.get("volume_analysis") or {}).get("mode") if decision else adaptive_volume.get("mode"),
-            "score": (decision.get("volume_analysis") or {}).get("score") if decision else adaptive_volume.get("score"),
-            "volume_percentile": (decision.get("volume_analysis") or {}).get("volume_percentile") if decision else adaptive_volume.get("volume_percentile"),
-            "return_percentile": (decision.get("volume_analysis") or {}).get("return_percentile") if decision else adaptive_volume.get("return_percentile"),
-            "sample_size": (decision.get("volume_analysis") or {}).get("sample_size") if decision else adaptive_volume.get("sample_size"),
+            "status": decision.get("volume_status") if decision else "資料不足",
         },
         "recent": {
             "high": recent_high,
@@ -2901,239 +2960,66 @@ def get_stock_data():
         "revenue_yoy": revenue_yoy,
         "revenue_data": (_revenue_raw_cache.get(stock_id, (0, []))[1] if stock_id in _revenue_raw_cache else []),
         "valuation": valuation,
-        "financial": financial,
+        "fundamental_model": fundamental_model,
+        "technical_core": technical_core,
+        "chip_model": chip_model,
+        "three_core": three_core,
         "decision": decision,
         "position": position,
-        "quant_model": quant_model,
-        "investor_decision": investor_decision,
+        "v27": v27,
     }
     return jsonify(result)
 
 
 # ===========================================================================
-# V2.6.7 /api/intraday — 輕量盤中行情（供動態價位引擎使用）
-# ---------------------------------------------------------------------------
-# 只向證交所 MIS 查詢「當下價格 / 開盤 / 高低 / 累計量」，不重跑 FinMind
-# 技術指標，因此盤中刷新不會消耗 FinMind 配額。加 20 秒記憶體快取，避免
-# 使用者連點或多分頁時對公開即時來源造成不必要壓力。
+# /api/news — Google News RSS
 # ===========================================================================
-_INTRADAY_CACHE = {}
-_INTRADAY_CACHE_TTL = 20
-_INTRADAY_LOCK = threading.Lock()
-
-
-def _twse_float(value):
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text in ("-", "--", "---"):
-        return None
-    # MIS 的買賣價有時以底線串列表示；取第一個可解析值。
-    for part in text.replace(",", "").split("_"):
-        try:
-            return float(part)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-@app.route("/api/intraday")
-def get_intraday_data():
-    stock_id = request.args.get("symbol", "").strip()
-    if not stock_id or not stock_id.isdigit():
-        return jsonify({"status": 400, "msg": "請輸入數字股票代號"}), 400
-
-    now_ts = time.time()
-    with _INTRADAY_LOCK:
-        cached = _INTRADAY_CACHE.get(stock_id)
-        if cached and now_ts - cached.get("ts", 0) < _INTRADAY_CACHE_TTL:
-            return jsonify(cached["payload"])
-
-    # 同一請求同時帶上市與上櫃 channel；無效 channel 會被來源忽略。
-    ex_ch = f"tse_{stock_id}.tw|otc_{stock_id}.tw"
-    try:
-        resp = requests.get(
-            "https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
-            params={"ex_ch": ex_ch, "json": "1", "delay": "0"},
-            headers={
-                "User-Agent": "Mozilla/5.0",
-                "Referer": "https://mis.twse.com.tw/stock/fibest.jsp",
-                "Accept": "application/json,text/plain,*/*",
-            },
-            timeout=8,
-        )
-        resp.raise_for_status()
-        obj = resp.json()
-        rows = obj.get("msgArray") or []
-        row = next((x for x in rows if str(x.get("c", "")) == stock_id), None)
-        if not row:
-            return jsonify({
-                "status": 404,
-                "msg": "盤中行情暫無資料（可能為休市、非交易時段或即時來源未回應）",
-                "source": "TWSE MIS",
-            }), 404
-
-        current = _twse_float(row.get("z"))
-        # 開盤前 / 尚未成交時 z 可能為 '-'，以最佳買/賣的可得價格作顯示備援，
-        # 但標示 traded=false，避免把委買賣價誤認為成交價。
-        traded = current is not None
-        if current is None:
-            bid = _twse_float(row.get("b"))
-            ask = _twse_float(row.get("a"))
-            if bid is not None and ask is not None:
-                current = round((bid + ask) / 2, 2)
-            else:
-                current = bid if bid is not None else ask
-
-        volume_lots = _twse_float(row.get("v"))
-        volume_shares = int(round(volume_lots * 1000)) if volume_lots is not None else None
-        prev_close = _twse_float(row.get("y"))
-        change_pct = None
-        if current is not None and prev_close not in (None, 0):
-            change_pct = round((current - prev_close) / prev_close * 100, 2)
-
-        payload = {
-            "status": 200,
-            "symbol": stock_id,
-            "name": row.get("n") or "",
-            "market": row.get("ex") or "",
-            "current": current,
-            "open": _twse_float(row.get("o")),
-            "high": _twse_float(row.get("h")),
-            "low": _twse_float(row.get("l")),
-            "prev_close": prev_close,
-            "change_pct": change_pct,
-            "volume_shares": volume_shares,
-            "volume_lots": int(round(volume_lots)) if volume_lots is not None else None,
-            "date": row.get("d") or "",
-            "time": row.get("t") or "",
-            "traded": traded,
-            "source": "TWSE MIS",
-            "cached_seconds": _INTRADAY_CACHE_TTL,
-        }
-        with _INTRADAY_LOCK:
-            _INTRADAY_CACHE[stock_id] = {"ts": now_ts, "payload": payload}
-        return jsonify(payload)
-    except Exception as exc:
-        return jsonify({
-            "status": 503,
-            "msg": "即時行情來源暫時無法連線",
-            "detail": str(exc)[:160],
-            "source": "TWSE MIS",
-        }), 503
-
-
-# ===========================================================================
-# V2.8.0 新聞／重大事件層
-# ===========================================================================
-_EVENT_RULES = [
-    ("重大訊息", ("重大訊息", "重訊", "重大公告")),
-    ("法說會", ("法說", "法人說明會")),
-    ("財報/EPS", ("財報", "季報", "年報", "EPS", "每股盈餘", "獲利")),
-    ("月營收", ("營收", "月增", "年增")),
-    ("股利/除權息", ("股利", "配息", "配股", "除權", "除息")),
-    ("庫藏股", ("庫藏股",)),
-    ("增減資", ("增資", "減資", "現增", "私募")),
-    ("併購/投資", ("併購", "收購", "合併", "策略投資")),
-    ("資產處分", ("處分資產", "出售資產", "取得資產")),
-    ("交易異常", ("停牌", "暫停交易", "處置", "注意股", "警示")),
-]
-_EVENT_POS = ("創高", "大增", "成長", "優於預期", "上修", "調升", "獲利成長", "轉盈", "擴產", "取得訂單", "買回", "庫藏股")
-_EVENT_NEG = ("虧損", "衰退", "下修", "調降", "減損", "違約", "訴訟", "停牌", "處置", "警示", "大減", "年減", "裁員", "火災", "停工")
-_EVENT_HIGH = ("重大訊息", "重訊", "財報", "季報", "年報", "法說", "停牌", "暫停交易", "處置", "併購", "收購", "增資", "減資", "庫藏股")
-
-
-def _fetch_google_news(q, limit=10):
-    rss_url = f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-    resp = requests.get(rss_url, timeout=10)
-    resp.raise_for_status()
-    resp.encoding = "utf-8"
-    root = ET.fromstring(resp.text)
-    items = root.findall(".//item")
-    news_list = []
-    from email.utils import parsedate_to_datetime
-    for item in items[:limit]:
-        title = item.findtext("title", default="")
-        source_elem = item.find("source")
-        source = source_elem.text if source_elem is not None else ""
-        source_url = source_elem.get("url", "") if source_elem is not None else ""
-        link = source_url if source_url else item.findtext("link", default="")
-        pub_date_raw = item.findtext("pubDate", default="")
-        pub_date = pub_date_raw
-        if pub_date_raw:
-            try:
-                dt = parsedate_to_datetime(pub_date_raw)
-                pub_date = dt.strftime("%Y/%m/%d %H:%M")
-            except Exception:
-                pass
-        news_list.append({"title": title, "link": link, "pubDate": pub_date, "source": source})
-    return news_list
-
-
-def _classify_event(title):
-    title = title or ""
-    category = None
-    for name, keys in _EVENT_RULES:
-        if any(k.lower() in title.lower() for k in keys):
-            category = name
-            break
-    if not category:
-        return None
-    pos = sum(1 for k in _EVENT_POS if k.lower() in title.lower())
-    neg = sum(1 for k in _EVENT_NEG if k.lower() in title.lower())
-    sentiment = "中性"
-    if pos > neg:
-        sentiment = "正面"
-    elif neg > pos:
-        sentiment = "負面"
-    impact = "高" if any(k.lower() in title.lower() for k in _EVENT_HIGH) else "中"
-    return {"category": category, "sentiment": sentiment, "impact": impact}
-
-
-@app.route("/api/events")
-def get_events():
-    q = request.args.get("q", "").strip()
-    if not q:
-        return jsonify({"status": 400, "msg": "缺少查詢參數 q", "data": [], "all_news": []}), 400
-    try:
-        news = _fetch_google_news(q, limit=12)
-        events = []
-        for n in news:
-            cls = _classify_event(n.get("title", ""))
-            if cls:
-                item = dict(n)
-                item.update(cls)
-                events.append(item)
-        neg_high = sum(1 for x in events if x["sentiment"] == "負面" and x["impact"] == "高")
-        neg_any = sum(1 for x in events if x["sentiment"] == "負面")
-        pos_high = sum(1 for x in events if x["sentiment"] == "正面" and x["impact"] == "高")
-        risk_level = "高" if neg_high else ("中" if neg_any else "低")
-        if neg_high:
-            summary = "偵測到高影響負面事件，進場與加碼應保守處理。"
-        elif neg_any:
-            summary = "偵測到負面事件，需與價格反應一起確認。"
-        elif pos_high:
-            summary = "偵測到高影響正面事件，但仍需確認是否已反映在股價。"
-        elif events:
-            summary = "近期有公司事件，方向以價格與量能確認為主。"
-        else:
-            summary = "近期公開新聞未偵測到明顯重大事件關鍵字。"
-        return jsonify({
-            "status": 200, "data": events[:8], "all_news": news[:8],
-            "risk_level": risk_level, "summary": summary,
-            "counts": {"events": len(events), "negative": neg_any, "negative_high": neg_high, "positive_high": pos_high},
-        })
-    except Exception as e:
-        return jsonify({"status": 500, "msg": f"抓取事件失敗: {e}", "data": [], "all_news": []}), 500
-
-
 @app.route("/api/news")
 def get_news():
     q = request.args.get("q", "").strip()
     if not q:
         return jsonify({"status": 400, "msg": "缺少查詢參數 q", "data": []}), 400
+
+    rss_url = (
+        f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    )
     try:
-        return jsonify({"status": 200, "data": _fetch_google_news(q, limit=5)})
+        resp = requests.get(rss_url, timeout=10)
+        resp.encoding = "utf-8"
+        root = ET.fromstring(resp.text)
+        items = root.findall(".//item")
+        news_list = []
+        for item in items[:5]:
+            title = item.findtext("title", default="")
+            # Google News 的 link 是編碼連結，直接點會 400
+            # 改用 <source url="..."> 取得原始新聞網站連結
+            source_elem = item.find("source")
+            source = source_elem.text if source_elem is not None else ""
+            source_url = source_elem.get("url", "") if source_elem is not None else ""
+            # 如果有 source_url 就用它，否則 fallback 到 Google News 連結
+            link = source_url if source_url else item.findtext("link", default="")
+
+            # 日期格式轉換：RSS 原始格式 "Mon, 07 Sep 2026 01:41:50 GMT"
+            # 轉成 "2026/09/07 01:41" 數字格式
+            pub_date_raw = item.findtext("pubDate", default="")
+            pub_date = pub_date_raw  # fallback 用原始格式
+            if pub_date_raw:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    dt = parsedate_to_datetime(pub_date_raw)
+                    pub_date = dt.strftime("%Y/%m/%d %H:%M")
+                except Exception:
+                    pass
+
+            news_list.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "pubDate": pub_date,
+                    "source": source,
+                }
+            )
+        return jsonify({"status": 200, "data": news_list})
     except Exception as e:
         return jsonify({"status": 500, "msg": f"抓取新聞失敗: {e}", "data": []}), 500
 
@@ -3147,7 +3033,6 @@ def get_us_market():
         "^DJI": "道瓊工業指數",
         "^GSPC": "S&P 500",
         "^IXIC": "那斯達克綜合指數",
-        "^SOX": "費城半導體指數",
     }
     results = []
 
@@ -3432,189 +3317,6 @@ def get_top_institutional():
 
     return jsonify({"status": 200, "cached": False, **result})
 
-
-
-# ===========================================================================
-# V2.5.4 Google Gemini AI 輔助分析層（Render Free 記憶體優化）
-# ---------------------------------------------------------------------------
-# 不載入 google-genai SDK，直接使用既有 requests 呼叫 Gemini REST API，
-# 避免 Free instance 在 request 時載入大型 SDK/相依套件造成 worker OOM。
-# Gemini 只解讀既有引擎結果，不覆寫價位、停損、評分或回測公式。
-# ===========================================================================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
-GEMINI_FALLBACK_MODEL = os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite").strip()
-
-
-def _trim_ai_value(value, depth=0):
-    """限制送往 AI 的資料大小；只保留摘要需要的純量/少量欄位。"""
-    if depth > 3:
-        return None
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        return value[:500]
-    if isinstance(value, list):
-        return [_trim_ai_value(v, depth + 1) for v in value[:8]]
-    if isinstance(value, dict):
-        out = {}
-        for i, (k, v) in enumerate(value.items()):
-            if i >= 24:
-                break
-            tv = _trim_ai_value(v, depth + 1)
-            if tv is not None:
-                out[str(k)[:80]] = tv
-        return out
-    return str(value)[:300]
-
-
-def _compact_ai_payload(payload):
-    if not isinstance(payload, dict):
-        return {}
-    allowed = ["symbol", "name", "industry", "scores", "techData", "fundData",
-               "chipData", "usData", "newsData", "tomorrowScenario"]
-    clean = {k: _trim_ai_value(payload.get(k)) for k in allowed if k in payload}
-    news = payload.get("newsData")
-    if isinstance(news, dict):
-        news = news.get("data") or news.get("news") or []
-    if isinstance(news, list):
-        clean["newsData"] = [
-            {k: str(n.get(k, ""))[:220] for k in ("title", "source", "pubDate") if n.get(k)}
-            for n in news[:4] if isinstance(n, dict)
-        ]
-    return clean
-
-
-def _extract_json_object(text):
-    text = (text or "").strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    try:
-        return json.loads(text)
-    except Exception:
-        a, b = text.find("{"), text.rfind("}")
-        if a >= 0 and b > a:
-            return json.loads(text[a:b+1])
-        raise ValueError("Gemini 回傳內容不是有效 JSON")
-
-
-@app.route("/api/ai/status")
-def ai_status():
-    return jsonify({
-        "status": 200,
-        "enabled": bool(GEMINI_API_KEY),
-        "provider": "Google Gemini",
-        "model": GEMINI_MODEL if GEMINI_API_KEY else None,
-        "mode": "advisory_only_rest_low_memory",
-    })
-
-
-@app.route("/api/ai/analyze", methods=["POST"])
-def ai_analyze():
-    if not GEMINI_API_KEY:
-        return jsonify({"status": 503, "msg": "尚未設定 GEMINI_API_KEY。"}), 503
-
-    payload = _compact_ai_payload(request.get_json(silent=True) or {})
-    if not payload.get("symbol"):
-        return jsonify({"status": 400, "msg": "缺少股票代號，請先執行個股健診。"}), 400
-
-    instruction = (
-        "你是台股分析系統的輔助解讀層。只能根據提供資料客觀整理，不可捏造資料，"
-        "不可覆寫系統計算的價位、停損、評分、隔日情境或回測。若有 tomorrowScenario，請解釋其條件與風險，不可把情境評估描述成必然漲跌。使用繁體中文（台灣用語）。"
-        "請只回傳一個 JSON 物件，不要 Markdown。欄位固定為："
-        "summary(80到160字字串)、strengths(最多4項字串陣列)、risks(最多4項)、"
-        "watch_points(最多4項)、data_quality(字串)。不要承諾報酬。"
-    )
-    prompt = instruction + "\n資料：" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-    prompt = prompt[:16000]
-    body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "maxOutputTokens": 700,
-            "temperature": 0.2,
-        },
-    }
-
-    # V2.5.3：先用 3.8 Flash；暫時性壅塞時短暫重試，再自動切換 Flash-Lite。
-    # 避免長時間 exponential backoff 卡住 Render Free worker。
-    model_plan = [(GEMINI_MODEL, 2)]
-    if GEMINI_FALLBACK_MODEL and GEMINI_FALLBACK_MODEL != GEMINI_MODEL:
-        model_plan.append((GEMINI_FALLBACK_MODEL, 2))
-    transient_codes = {408, 429, 500, 502, 503, 504}
-    last_code, last_detail = None, ""
-
-    try:
-        for model_index, (model, attempts) in enumerate(model_plan):
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            for attempt in range(attempts):
-                try:
-                    resp = requests.post(
-                        url,
-                        headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-                        json=body,
-                        timeout=(6, 32),
-                    )
-                except requests.Timeout:
-                    last_code, last_detail = 504, "Gemini 回應逾時"
-                    if attempt + 1 < attempts:
-                        time.sleep(1.2 * (2 ** attempt))
-                        continue
-                    break
-
-                if resp.status_code == 200:
-                    data = resp.json()
-                    candidates = data.get("candidates") or []
-                    parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
-                    raw = "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict)).strip()
-                    if not raw:
-                        reason = (candidates[0].get("finishReason") if candidates else None) or "無回傳文字"
-                        last_code, last_detail = 502, f"Gemini 未產生分析內容：{reason}"
-                        break
-                    result = _extract_json_object(raw)
-                    return jsonify({
-                        "status": 200,
-                        "provider": "Google Gemini",
-                        "model": model,
-                        "fallback_used": model != GEMINI_MODEL,
-                        "analysis": result,
-                        "generated_at": datetime.now().isoformat(timespec="seconds"),
-                    })
-
-                last_code = resp.status_code
-                last_detail = resp.text[:700]
-                print(f"[Gemini REST error] model={model} attempt={attempt+1} HTTP {last_code} {last_detail}", flush=True)
-
-                if last_code not in transient_codes:
-                    # 400/401/403 等設定錯誤不應重試或切模型。
-                    safe_detail = last_detail.replace(GEMINI_API_KEY, "***")
-                    return jsonify({"status": 502, "msg": f"Gemini API HTTP {last_code}：{safe_detail[:350]}"}), 502
-
-                if attempt + 1 < attempts:
-                    # 短版 exponential backoff，兼顧 Render Free 的 request 時間。
-                    time.sleep(1.2 * (2 ** attempt))
-
-            if model_index + 1 < len(model_plan):
-                print(f"[Gemini fallback] {model} unavailable -> {model_plan[model_index+1][0]}", flush=True)
-
-        # 主模型與備援模型都遇到暫時性錯誤時，回傳友善訊息而非整段 Google JSON。
-        if last_code in transient_codes:
-            return jsonify({
-                "status": 503,
-                "msg": "Gemini 目前服務繁忙，系統已自動重試並切換備援模型，但仍暫時無法完成。請稍後再按一次。",
-                "upstream_status": last_code,
-            }), 503
-        return jsonify({"status": 502, "msg": "Gemini 暫時無法完成分析。"}), 502
-
-    except Exception as e:
-        msg = str(e).replace(GEMINI_API_KEY, "***") if GEMINI_API_KEY else str(e)
-        print("[Gemini REST exception]", type(e).__name__, msg[:800], flush=True)
-        return jsonify({"status": 502, "msg": "Gemini 分析失敗：" + msg[:350]}), 502
 
 # ===========================================================================
 # Main
