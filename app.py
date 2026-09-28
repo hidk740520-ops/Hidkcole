@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-台股個股健診 V2.7.0 模型核心模組版 — Flask 後端
+台股個股健診 V2.8.0 三頁決策整合版 — Flask 後端
 ================================
 安裝說明：
     pip install flask requests yfinance pandas
@@ -2152,8 +2152,62 @@ def build_investor_decision(model_output, remaining_upside, market_decision, clo
     if aux_missing:
         reason += " 部分輔助資料缺失，操作建議已自動保守降級。"
 
+    # V2.8.0：把投資人真正需要的操作拆成六類，讓前台直接顯示，不必自行解讀技術指標。
+    position_status = (position or {}).get("status") if isinstance(position, dict) else None
+    entry_action = buy_status
+    add_action = add_status
+    if position_status is None:
+        hold_action = "未輸入持股"
+        reduce_action = "未輸入持股"
+    elif position_status == "STOP":
+        hold_action = "不續抱"
+        reduce_action = "停止減碼，改停損"
+    elif position_status == "REDUCE":
+        hold_action = "部分續抱"
+        reduce_action = "建議減碼"
+    else:
+        hold_action = "可以續抱" if not risk_warning else "謹慎續抱"
+        reduce_action = "暫不減碼"
+
+    take_profit_action = "等待停利區"
+    if c is not None and first_price is not None and c >= first_price:
+        take_profit_action = "分批停利"
+    if c is not None and main_price is not None and c >= main_price:
+        take_profit_action = "主要停利"
+
+    stop_action = "守停損線"
+    if risk_hit or position_status == "STOP":
+        stop_action = "執行停損"
+    elif risk_warning:
+        stop_action = "停損警戒"
+
+    primary_action = "等待"
+    if stop_action == "執行停損":
+        primary_action = "停損"
+    elif take_profit_action in ("分批停利", "主要停利") and position_status is not None:
+        primary_action = "停利"
+    elif reduce_action == "建議減碼":
+        primary_action = "減碼"
+    elif add_action in ("可以加碼", "小量加碼") and position_status is not None:
+        primary_action = "加碼"
+    elif hold_action in ("可以續抱", "謹慎續抱", "部分續抱") and position_status is not None:
+        primary_action = "續抱"
+    elif entry_action == "可以買":
+        primary_action = "進場"
+
+    six_actions = {
+        "entry": {"label": "進場", "status": entry_action},
+        "add": {"label": "加碼", "status": add_action},
+        "hold": {"label": "續抱", "status": hold_action},
+        "reduce": {"label": "減碼", "status": reduce_action},
+        "take_profit": {"label": "停利", "status": take_profit_action, "price": round(first_price, 2) if first_price is not None else None},
+        "stop_loss": {"label": "停損", "status": stop_action, "price": round(stop_price, 2) if stop_price is not None else None},
+    }
+
     return {
         "available": True,
+        "primary_action": primary_action,
+        "six_actions": six_actions,
         "buy_status": buy_status,
         "add_status": add_status,
         "tomorrow_direction": direction,
@@ -2970,54 +3024,116 @@ def get_intraday_data():
 
 
 # ===========================================================================
-# /api/news — Google News RSS
+# V2.8.0 新聞／重大事件層
 # ===========================================================================
+_EVENT_RULES = [
+    ("重大訊息", ("重大訊息", "重訊", "重大公告")),
+    ("法說會", ("法說", "法人說明會")),
+    ("財報/EPS", ("財報", "季報", "年報", "EPS", "每股盈餘", "獲利")),
+    ("月營收", ("營收", "月增", "年增")),
+    ("股利/除權息", ("股利", "配息", "配股", "除權", "除息")),
+    ("庫藏股", ("庫藏股",)),
+    ("增減資", ("增資", "減資", "現增", "私募")),
+    ("併購/投資", ("併購", "收購", "合併", "策略投資")),
+    ("資產處分", ("處分資產", "出售資產", "取得資產")),
+    ("交易異常", ("停牌", "暫停交易", "處置", "注意股", "警示")),
+]
+_EVENT_POS = ("創高", "大增", "成長", "優於預期", "上修", "調升", "獲利成長", "轉盈", "擴產", "取得訂單", "買回", "庫藏股")
+_EVENT_NEG = ("虧損", "衰退", "下修", "調降", "減損", "違約", "訴訟", "停牌", "處置", "警示", "大減", "年減", "裁員", "火災", "停工")
+_EVENT_HIGH = ("重大訊息", "重訊", "財報", "季報", "年報", "法說", "停牌", "暫停交易", "處置", "併購", "收購", "增資", "減資", "庫藏股")
+
+
+def _fetch_google_news(q, limit=10):
+    rss_url = f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+    resp = requests.get(rss_url, timeout=10)
+    resp.raise_for_status()
+    resp.encoding = "utf-8"
+    root = ET.fromstring(resp.text)
+    items = root.findall(".//item")
+    news_list = []
+    from email.utils import parsedate_to_datetime
+    for item in items[:limit]:
+        title = item.findtext("title", default="")
+        source_elem = item.find("source")
+        source = source_elem.text if source_elem is not None else ""
+        source_url = source_elem.get("url", "") if source_elem is not None else ""
+        link = source_url if source_url else item.findtext("link", default="")
+        pub_date_raw = item.findtext("pubDate", default="")
+        pub_date = pub_date_raw
+        if pub_date_raw:
+            try:
+                dt = parsedate_to_datetime(pub_date_raw)
+                pub_date = dt.strftime("%Y/%m/%d %H:%M")
+            except Exception:
+                pass
+        news_list.append({"title": title, "link": link, "pubDate": pub_date, "source": source})
+    return news_list
+
+
+def _classify_event(title):
+    title = title or ""
+    category = None
+    for name, keys in _EVENT_RULES:
+        if any(k.lower() in title.lower() for k in keys):
+            category = name
+            break
+    if not category:
+        return None
+    pos = sum(1 for k in _EVENT_POS if k.lower() in title.lower())
+    neg = sum(1 for k in _EVENT_NEG if k.lower() in title.lower())
+    sentiment = "中性"
+    if pos > neg:
+        sentiment = "正面"
+    elif neg > pos:
+        sentiment = "負面"
+    impact = "高" if any(k.lower() in title.lower() for k in _EVENT_HIGH) else "中"
+    return {"category": category, "sentiment": sentiment, "impact": impact}
+
+
+@app.route("/api/events")
+def get_events():
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"status": 400, "msg": "缺少查詢參數 q", "data": [], "all_news": []}), 400
+    try:
+        news = _fetch_google_news(q, limit=12)
+        events = []
+        for n in news:
+            cls = _classify_event(n.get("title", ""))
+            if cls:
+                item = dict(n)
+                item.update(cls)
+                events.append(item)
+        neg_high = sum(1 for x in events if x["sentiment"] == "負面" and x["impact"] == "高")
+        neg_any = sum(1 for x in events if x["sentiment"] == "負面")
+        pos_high = sum(1 for x in events if x["sentiment"] == "正面" and x["impact"] == "高")
+        risk_level = "高" if neg_high else ("中" if neg_any else "低")
+        if neg_high:
+            summary = "偵測到高影響負面事件，進場與加碼應保守處理。"
+        elif neg_any:
+            summary = "偵測到負面事件，需與價格反應一起確認。"
+        elif pos_high:
+            summary = "偵測到高影響正面事件，但仍需確認是否已反映在股價。"
+        elif events:
+            summary = "近期有公司事件，方向以價格與量能確認為主。"
+        else:
+            summary = "近期公開新聞未偵測到明顯重大事件關鍵字。"
+        return jsonify({
+            "status": 200, "data": events[:8], "all_news": news[:8],
+            "risk_level": risk_level, "summary": summary,
+            "counts": {"events": len(events), "negative": neg_any, "negative_high": neg_high, "positive_high": pos_high},
+        })
+    except Exception as e:
+        return jsonify({"status": 500, "msg": f"抓取事件失敗: {e}", "data": [], "all_news": []}), 500
+
+
 @app.route("/api/news")
 def get_news():
     q = request.args.get("q", "").strip()
     if not q:
         return jsonify({"status": 400, "msg": "缺少查詢參數 q", "data": []}), 400
-
-    rss_url = (
-        f"https://news.google.com/rss/search?q={q}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
-    )
     try:
-        resp = requests.get(rss_url, timeout=10)
-        resp.encoding = "utf-8"
-        root = ET.fromstring(resp.text)
-        items = root.findall(".//item")
-        news_list = []
-        for item in items[:5]:
-            title = item.findtext("title", default="")
-            # Google News 的 link 是編碼連結，直接點會 400
-            # 改用 <source url="..."> 取得原始新聞網站連結
-            source_elem = item.find("source")
-            source = source_elem.text if source_elem is not None else ""
-            source_url = source_elem.get("url", "") if source_elem is not None else ""
-            # 如果有 source_url 就用它，否則 fallback 到 Google News 連結
-            link = source_url if source_url else item.findtext("link", default="")
-
-            # 日期格式轉換：RSS 原始格式 "Mon, 07 Sep 2026 01:41:50 GMT"
-            # 轉成 "2026/09/07 01:41" 數字格式
-            pub_date_raw = item.findtext("pubDate", default="")
-            pub_date = pub_date_raw  # fallback 用原始格式
-            if pub_date_raw:
-                try:
-                    from email.utils import parsedate_to_datetime
-                    dt = parsedate_to_datetime(pub_date_raw)
-                    pub_date = dt.strftime("%Y/%m/%d %H:%M")
-                except Exception:
-                    pass
-
-            news_list.append(
-                {
-                    "title": title,
-                    "link": link,
-                    "pubDate": pub_date,
-                    "source": source,
-                }
-            )
-        return jsonify({"status": 200, "data": news_list})
+        return jsonify({"status": 200, "data": _fetch_google_news(q, limit=5)})
     except Exception as e:
         return jsonify({"status": 500, "msg": f"抓取新聞失敗: {e}", "data": []}), 500
 
