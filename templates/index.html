@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>台股個股健診 V2.7.0 正式版 盤中量價分級燈號＋異常量警報版</title>
+<title>台股個股健診 V2.8.0 三頁投資決策整合版</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -174,6 +174,21 @@ tr:last-child td{border-bottom:none}
 .detail-card[open]>summary:after{content:'收合 －'}
 .detail-card>.card-body{padding:0 18px 18px}
 @media(max-width:640px){.battle-grid{grid-template-columns:1fr}.battle-kpis{grid-template-columns:repeat(2,1fr)}.intraday-grid{grid-template-columns:repeat(2,1fr)}.traffic-wrap{grid-template-columns:1fr}.battle-stock{font-size:1.08rem}}
+
+/* V2.8.0 三頁式前台：手機避免超長單頁 */
+.tab-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:14px;position:sticky;top:0;z-index:20;background:var(--bg);padding:8px 0}
+.tab-btn{border:1px solid var(--border);background:var(--card);color:var(--text-dim);border-radius:9px;padding:10px 8px;font-weight:700;cursor:pointer}
+.tab-btn.active{border-color:var(--blue);color:var(--heading);background:var(--card2);box-shadow:0 0 0 1px rgba(94,143,214,.18) inset}
+.tab-page{display:none}.tab-page.active{display:block}
+.six-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:12px}
+.six-action{background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:11px;min-height:82px}
+.six-action small{display:block;color:var(--text-dim);margin-bottom:5px}.six-action strong{font-size:1rem;color:var(--heading)}
+.primary-action{display:flex;justify-content:space-between;gap:10px;align-items:center;background:rgba(94,143,214,.09);border:1px solid var(--blue);border-radius:10px;padding:12px;margin-bottom:10px}
+.event-badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:.72rem;font-weight:700;margin-right:5px}.impact-high{background:var(--red-bg);color:var(--red)}.impact-mid{background:var(--yellow-bg);color:var(--yellow)}
+.event-row{padding:10px 0;border-bottom:1px solid rgba(60,65,80,.45)}.event-row:last-child{border-bottom:none}
+.backend-box{margin-top:12px}.backend-box>summary{cursor:pointer;color:var(--blue);font-weight:700;padding:12px 2px}
+@media(max-width:640px){.six-grid{grid-template-columns:repeat(2,1fr)}.tab-btn{font-size:.88rem}.tab-nav{top:0}}
+
 </style>
 </head>
 <body>
@@ -181,7 +196,7 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== HEADER ===================== -->
 <div class="header">
   <div class="header-top">
-    <h1>📊 台股個股健診 V2.7.0 正式版</h1>
+    <h1>📊 台股個股健診 V2.8.0 正式版</h1>
     <div class="report-time" id="reportTime"></div>
   </div>
   <div class="search-bar">
@@ -206,138 +221,89 @@ tr:last-child td{border-bottom:none}
 
 <!-- ===================== MAIN ===================== -->
 <div class="container">
-
-  <!-- ===== 投資人五答案：收盤後分析／隔日預測 ===== -->
-  <div class="card battle-card">
-    <div class="card-title"><span class="icon">🎯</span>短線投資決策</div>
-    <div class="card-body" id="battleBody"><div class="placeholder">輸入股票代號開始健診</div></div>
+  <div class="tab-nav" role="tablist" aria-label="個股健診分頁">
+    <button class="tab-btn active" data-tab="todayPage" onclick="switchTab('todayPage')">今日復盤</button>
+    <button class="tab-btn" data-tab="tomorrowPage" onclick="switchTab('tomorrowPage')">明日作戰</button>
+    <button class="tab-btn" data-tab="holdingPage" onclick="switchTab('holdingPage')">持股</button>
   </div>
 
-  <!-- ===== 🎯 交易決策中心 ===== -->
-  <div class="card" style="margin-bottom:16px">
-    <div class="card-title"><span class="icon">🎯</span>交易決策中心</div>
-    <div class="card-body" id="decisionBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
+  <section class="tab-page active" id="todayPage">
+    <div class="card battle-card">
+      <div class="card-title"><span class="icon">📌</span>今日量價復盤</div>
+      <div class="card-body" id="todayBody"><div class="placeholder">輸入股票代號開始健診</div></div>
     </div>
-  </div>
-
-<div class="grid">
-
-  <!-- ===== 策略燈號 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">🚦</span>策略燈號（短線／波段）</div>
-    <div class="card-body" id="strategyBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
+    <div class="card">
+      <div class="card-title"><span class="icon">⚠️</span>重大事件｜財報｜營收</div>
+      <div class="card-body" id="eventBody"><div class="placeholder">輸入股票代號開始健診</div></div>
     </div>
-  </div>
-
-  <!-- ===== 估值分析 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">💰</span>估值分析（合理價格區間）</div>
-    <div class="card-body" id="valuationBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
+    <div class="grid" style="margin-top:16px">
+      <div class="card"><div class="card-title"><span class="icon">🇺🇸</span>美股環境</div><div class="card-body" id="usBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
+      <div class="card"><div class="card-title"><span class="icon">📰</span>個股新聞</div><div class="card-body" id="newsBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
     </div>
-  </div>
+    <details class="card detail-card" style="margin-top:16px">
+      <summary><div class="card-title"><span class="icon">💹</span>資金面補充（後台資料）</div></summary>
+      <div class="card-body">
+        <div class="grid">
+          <div><h4 style="margin-bottom:8px">法人族群流向</h4><div id="sectorBody"><div class="placeholder">載入中</div></div></div>
+          <div><h4 style="margin-bottom:8px">法人買賣超排行</h4><div id="topInstBody"><div class="placeholder">載入中</div></div></div>
+        </div>
+      </div>
+    </details>
+  </section>
 
-  <!-- ===== 持股價格分析 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">📌</span>持股價格分析</div>
-    <div class="card-body" id="positionBody">
-      <div class="placeholder">填寫上方「買入價」後查詢即可看到分析</div>
+  <section class="tab-page" id="tomorrowPage">
+    <div class="card battle-card">
+      <div class="card-title"><span class="icon">🎯</span>六類投資決策｜明日作戰卡</div>
+      <div class="card-body" id="battleBody"><div class="placeholder">輸入股票代號開始健診</div></div>
     </div>
-  </div>
-
-  <!-- ===== 技術面 ===== -->
-  <details class="card detail-card">
-    <summary><div class="card-title"><span class="icon">📈</span>技術面分析</div></summary>
-    <div class="card-body" id="techBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title"><span class="icon">🧭</span>關鍵價位與執行條件</div>
+      <div class="card-body" id="decisionBody"><div class="placeholder">輸入股票代號開始健診</div></div>
     </div>
-  </details>
-
-  <!-- ===== 基本面 ===== -->
-  <details class="card detail-card">
-    <summary><div class="card-title"><span class="icon">📋</span>基本面分析</div></summary>
-    <div class="card-body" id="fundBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
+    <div class="grid">
+      <div class="card"><div class="card-title"><span class="icon">🚦</span>策略燈號</div><div class="card-body" id="strategyBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
+      <div class="card"><div class="card-title"><span class="icon">💰</span>估值與價格空間</div><div class="card-body" id="valuationBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
     </div>
-  </details>
+  </section>
 
-  <!-- ===== 籌碼面 ===== -->
-  <details class="card detail-card">
-    <summary><div class="card-title"><span class="icon">💰</span>籌碼面分析</div></summary>
-    <div class="card-body" id="chipBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
+  <section class="tab-page" id="holdingPage">
+    <div class="card battle-card">
+      <div class="card-title"><span class="icon">📌</span>我的持股決策</div>
+      <div class="card-body" id="positionBody"><div class="placeholder">填寫上方「買入價」後查詢即可看到分析</div></div>
     </div>
-  </details>
 
-  <!-- ===== 法人族群流向 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">🏭</span>法人族群流向</div>
-    <div class="card-body" id="sectorBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
-    </div>
-  </div>
+    <details class="card detail-card backend-box">
+      <summary><div class="card-title"><span class="icon">🧠</span>後台分析明細</div></summary>
+      <div class="card-body">
+        <div class="grid">
+          <div><h4>技術模型</h4><div id="techBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
+          <div><h4>基本面模型</h4><div id="fundBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
+          <div><h4>籌碼模型</h4><div id="chipBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
+        </div>
+      </div>
+    </details>
 
-  <!-- ===== 法人買賣超排行 TOP10 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">🏆</span>法人買賣超排行 TOP10</div>
-    <div class="card-body" id="topInstBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
-    </div>
-  </div>
+    <details class="card detail-card backend-box">
+      <summary><div class="card-title"><span class="icon">📊</span>系統綜合判讀</div></summary>
+      <div class="card-body" id="verdictBody"><div class="placeholder">輸入股票代號開始健診</div></div>
+      <div class="card-body" style="border-top:1px solid var(--border)">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+          <button class="btn btn-primary" id="geminiBtn" onclick="runGeminiAnalysis()">✨ Google Gemini AI 輔助解讀</button>
+          <span id="geminiStatus" style="font-size:.82rem;color:var(--text-dim)">AI 不取代系統公式與停損規則</span>
+        </div>
+        <div id="geminiBody"><div class="placeholder">完成個股健診後，可手動啟動 Gemini 深度解讀</div></div>
+      </div>
+    </details>
 
-  <!-- ===== 美股概況 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">🇺🇸</span>美股概況</div>
-    <div class="card-body" id="usBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
-    </div>
-  </div>
-
-  <!-- ===== 今日新聞 ===== -->
-  <div class="card">
-    <div class="card-title"><span class="icon">📰</span>今日新聞</div>
-    <div class="card-body" id="newsBody">
-      <div class="placeholder">輸入股票代號開始健診</div>
-    </div>
-  </div>
-
-</div><!-- /grid -->
-
-<!-- ===== AI 綜合操作建議 ===== -->
-<div class="card" style="margin-top:16px">
-  <div class="card-title"><span class="icon">📊</span>系統綜合操作建議</div>
-  <div class="card-body" id="verdictBody">
-    <div class="placeholder">輸入股票代號開始健診</div>
-  </div>
-  <div class="card-body" style="border-top:1px solid var(--border)">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-      <button class="btn btn-primary" id="geminiBtn" onclick="runGeminiAnalysis()">✨ Google Gemini AI 輔助解讀</button>
-      <span id="geminiStatus" style="font-size:.82rem;color:var(--text-dim)">AI 不取代系統公式與停損規則</span>
-    </div>
-    <div id="geminiBody"><div class="placeholder">完成個股健診後，可手動啟動 Gemini 深度解讀（不會自動消耗 AI 配額）</div></div>
-  </div>
-</div>
-
-<!-- ===== 策略回測報告（獨立功能，不隨股票搜尋觸發）===== -->
-<div class="card" style="margin-top:16px">
-  <div class="card-title"><span class="icon">🧪</span>策略回測報告（短線・5支代表股・近~2年）</div>
-  <div class="card-body" id="backtestBody">
-    <div style="font-size:.85rem;color:var(--text-dim);margin-bottom:10px">
-      預設抓 2330台積電／2317鴻海／2454聯發科／2308台達電／2382廣達，近500天資料，
-      統計短線買進訊號出現後 5 個交易日的「毛／淨」績效；淨績效已計入買進手續費、賣出手續費與賣出證交稅。
-      此為歷史統計，非未來績效保證，結果會快取 24 小時。
-    </div>
-    <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-      <label for="backtestStocksInput" style="font-size:.85rem;color:var(--text-dim)">自訂股票（選填，逗號分隔，最多5支）：</label>
-      <input type="text" id="backtestStocksInput" placeholder="例如 2330,2603,3037" style="width:180px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
-    </div>
-    <button class="btn btn-primary" id="backtestBtn" onclick="runBacktest()">執行回測分析</button>
-    <div id="backtestResult" style="margin-top:12px"></div>
-  </div>
-</div>
-
+    <details class="card detail-card backend-box">
+      <summary><div class="card-title"><span class="icon">🧪</span>策略回測報告</div></summary>
+      <div class="card-body" id="backtestBody">
+        <div style="font-size:.85rem;color:var(--text-dim);margin-bottom:10px">近500天短線策略歷史統計；淨績效計入手續費與證交稅。歷史績效不代表未來結果。</div>
+        <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap"><label for="backtestStocksInput" style="font-size:.85rem;color:var(--text-dim)">自訂股票（選填，逗號分隔，最多5支）：</label><input type="text" id="backtestStocksInput" placeholder="例如 2330,2603,3037" style="width:180px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px"></div>
+        <button class="btn btn-primary" id="backtestBtn" onclick="runBacktest()">執行回測分析</button><div id="backtestResult" style="margin-top:12px"></div>
+      </div>
+    </details>
+  </section>
 </div><!-- /container -->
 
 <script>
@@ -355,6 +321,7 @@ var G = {
   chipData: null,
   usData: null,
   newsData: null,
+  eventData: null,
   sectorData: null,
 };
 var intradayTimer = null;
@@ -409,6 +376,15 @@ function fetchFinMind(dataset, dataId, startDate, endDate) {
 // ===========================================================================
 
 // ===========================================================================
+// 三頁式前台
+// ===========================================================================
+function switchTab(id) {
+  document.querySelectorAll('.tab-page').forEach(function(x){x.classList.toggle('active', x.id===id);});
+  document.querySelectorAll('.tab-btn').forEach(function(x){x.classList.toggle('active', x.getAttribute('data-tab')===id);});
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+// ===========================================================================
 // 主搜尋流程
 // ===========================================================================
 function doSearch() {
@@ -424,11 +400,11 @@ function doSearch() {
     stockId: '', stockName: '', industry: '', market: '', tomorrowScenario: null, intradayData: null,
     prices: [], scores: { tech:0, fund:0, chip:0, us:0, total:0 },
     techData: null, fundData: null, chipData: null,
-    usData: null, newsData: null, sectorData: null,
+    usData: null, newsData: null, eventData: null, sectorData: null,
   };
 
   // 顯示 loading
-  var bodies = ['techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody','decisionBody','battleBody'];
+  var bodies = ['todayBody','eventBody','techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody','decisionBody','battleBody'];
   bodies.forEach(function(id){
     document.getElementById(id).innerHTML = loadingHtml('載入中...');
   });
@@ -471,15 +447,16 @@ function doSearch() {
   }
 
   infoPromise.then(function(){
-    // 並行抓取所有資料（fetchTechData 會從 /api/stock 補填 name/industry）
+    // V2.8.0：先完成核心模型與股票身分，再抓其餘資料，避免營收/名稱競態。
+    return fetchTechData();
+  }).then(function(){
     return Promise.all([
-      fetchTechData(),
       fetchFundData(),
       fetchChipData(),
       fetchSectorFlow(),
       fetchTopInstitutional(),
       fetchUSMarket(),
-      fetchNews()
+      fetchEvents()
     ]);
   }).then(function(){
     // 資料載入完成後更新 header（name/industry 可能來自 /api/stock）
@@ -619,13 +596,15 @@ function fetchTopInstitutional() {
   }).catch(function(){ G.topInstData = null; });
 }
 
-// --- 新聞 ---
-function fetchNews() {
+// --- V2.8.0 重大事件＋新聞：一次請求，同時供事件卡與新聞卡使用 ---
+function fetchEvents() {
   var q = G.stockName || G.stockId;
-  return fetch('/api/news?q=' + encodeURIComponent(q)).then(function(r){ return r.json(); }).then(function(j){
-    G.newsData = j;
-  }).catch(function(){ G.newsData = null; });
+  return fetch('/api/events?q=' + encodeURIComponent(q)).then(function(r){ return r.json(); }).then(function(j){
+    G.eventData = j;
+    G.newsData = {status:j.status, data:j.all_news || []};
+  }).catch(function(){ G.eventData = null; G.newsData = null; });
 }
+function fetchNews() { return fetchEvents(); }
 
 // ===========================================================================
 // 技術面計算 — 已移至後端 /api/stock，前端直接使用回傳結果
@@ -1044,6 +1023,17 @@ function displayInvestorDecision() {
     else if (d.add_status === '小量加碼') d.add_status = '暫停加碼';
     d.display_missing = missing;
   }
+  // 重大事件是風險閘門，只能把積極訊號往保守方向降級，不會單靠新聞把訊號升級。
+  var ev = G.eventData;
+  if (ev && ev.status===200 && (ev.risk_level==='高' || ev.risk_level==='中')) {
+    if (d.buy_status === '可以買') d.buy_status = '等待';
+    if (d.add_status === '可以加碼' || d.add_status === '小量加碼') d.add_status = '暫停加碼';
+    d.event_guard = ev.summary || '近期事件風險升高。';
+    if (d.six_actions) {
+      d.six_actions.entry.status = d.buy_status;
+      d.six_actions.add.status = d.add_status;
+    }
+  }
   return d;
 }
 
@@ -1070,27 +1060,22 @@ function renderBattleCard() {
   }
   var identity=escapeHtml((G.stockId||'')+(G.stockName?' '+G.stockName:''));
   var p=d.probabilities||{}, rem=d.remaining_upside||{}, tp=d.take_profit||{}, risk=d.risk||{};
-  var h='<div class="battle-head"><div><div class="battle-stock">'+identity+'</div><div style="color:var(--text-dim);font-size:.8rem">收盤後分析｜基準日 '+escapeHtml(t.lastDate||'--')+'</div></div>';
-  h+='<div style="text-align:right"><div class="battle-close">'+fmt(t.lastClose)+'</div><div style="font-size:.72rem;color:var(--text-dim)">最新收盤</div></div></div>';
-  h+='<div class="battle-grid" style="margin-top:12px">';
-  h+='<div class="battle-case"><b>① 現在能不能買</b><div class="'+decisionClass(d.buy_status)+'" style="font-size:1.2rem;font-weight:800;margin-top:5px">'+escapeHtml(d.buy_status||'--')+'</div></div>';
-  h+='<div class="battle-case"><b>② 已持有能不能加碼</b><div class="'+decisionClass(d.add_status)+'" style="font-size:1.2rem;font-weight:800;margin-top:5px">'+escapeHtml(d.add_status||'--')+'</div></div>';
-  h+='<div class="battle-case"><b>③ 明日方向</b><div class="'+decisionClass(d.tomorrow_direction)+'" style="font-size:1.2rem;font-weight:800;margin-top:5px">'+escapeHtml(d.tomorrow_direction||'--')+'</div><div style="font-size:.76rem;color:var(--text-dim);margin-top:4px">上漲 '+fmt(p.up,1)+'%｜震盪 '+fmt(p.flat,1)+'%｜下跌 '+fmt(p.down,1)+'%</div></div>';
+  var six=d.six_actions||{};
+  var h='<div class="battle-head"><div><div class="battle-stock">'+identity+'</div><div style="color:var(--text-dim);font-size:.8rem">收盤後分析｜基準日 '+escapeHtml(t.lastDate||'--')+'</div></div><div style="text-align:right"><div class="battle-close">'+fmt(t.lastClose)+'</div><div style="font-size:.72rem;color:var(--text-dim)">最新收盤</div></div></div>';
+  h+='<div class="primary-action"><div><small style="color:var(--text-dim)">目前主決策</small><strong style="font-size:1.35rem">'+escapeHtml(d.primary_action||'等待')+'</strong></div><div style="text-align:right;font-size:.8rem;color:var(--text-dim)">模型信心 '+escapeHtml(d.confidence||'--')+'<br>驗證 '+escapeHtml(d.model_health||'--')+'</div></div>';
+  var keys=['entry','add','hold','reduce','take_profit','stop_loss'];
+  h+='<div class="six-grid">';
+  keys.forEach(function(k){var x=six[k]||{};var st=x.status||'--';h+='<div class="six-action"><small>'+escapeHtml(x.label||k)+'</small><strong class="'+decisionClass(st)+'">'+escapeHtml(st)+'</strong>'+(x.price!=null?'<div class="mono" style="font-size:.76rem;color:var(--text-dim);margin-top:5px">參考 '+fmt(x.price)+'</div>':'')+'</div>';});
   h+='</div>';
-  h+='<div style="margin-top:12px;padding:12px;border:1px solid var(--border);border-radius:10px;background:var(--card2)">';
-  h+='<div><b>④ 預估剩餘獲利空間</b></div><div style="font-size:1.18rem;font-weight:800;margin-top:5px">約 +'+fmt(rem.low_pct,1)+'% ～ +'+fmt(rem.high_pct,1)+'% <span style="font-size:.85rem;color:var(--text-dim)">｜'+escapeHtml(rem.label||'--')+'</span></div>';
-  h+='</div>';
-  h+='<div style="margin-top:12px"><b>⑤ 停利／停損</b><table style="margin-top:6px">';
-  h+='<tr><th>第一停利區</th><td class="mono pos">'+zoneText(tp.first)+'</td></tr>';
-  h+='<tr><th>主要停利區</th><td class="mono pos">'+zoneText(tp.main)+'</td></tr>';
-  h+='<tr><th>風險警戒</th><td class="mono">'+(risk.warning_price!=null?fmt(risk.warning_price):'--')+'</td></tr>';
-  h+='<tr><th>停損評估</th><td class="mono neg">'+(risk.stop_price!=null?fmt(risk.stop_price):'--')+'</td></tr></table></div>';
+  h+='<div class="battle-kpis" style="margin-top:12px"><div class="battle-kpi"><small>明日方向</small><strong class="'+decisionClass(d.tomorrow_direction)+'">'+escapeHtml(d.tomorrow_direction||'--')+'</strong></div><div class="battle-kpi"><small>上漲機率</small><strong>'+fmt(p.up,1)+'%</strong></div><div class="battle-kpi"><small>剩餘空間</small><strong>+'+fmt(rem.low_pct,1)+'～+'+fmt(rem.high_pct,1)+'%</strong></div><div class="battle-kpi"><small>風險報酬</small><strong>'+fmt(d.risk_reward,2)+'</strong></div></div>';
+  h+='<table style="margin-top:8px"><tr><th>第一停利區</th><td class="mono pos">'+zoneText(tp.first)+'</td></tr><tr><th>主要停利區</th><td class="mono pos">'+zoneText(tp.main)+'</td></tr><tr><th>風險警戒</th><td class="mono">'+(risk.warning_price!=null?fmt(risk.warning_price):'--')+'</td></tr><tr><th>停損評估</th><td class="mono neg">'+(risk.stop_price!=null?fmt(risk.stop_price):'--')+'</td></tr></table>';
   h+='<div style="margin-top:12px;padding:10px 12px;border-left:3px solid var(--yellow);background:rgba(255,255,255,.03);border-radius:6px"><b>系統結論：</b>'+escapeHtml(d.reason||'')+'</div>';
-  h+='<div style="margin-top:7px;font-size:.74rem;color:var(--text-dim)">模型信心：'+escapeHtml(d.confidence||'--')+(d.model_health?'｜驗證狀態：'+escapeHtml(d.model_health):'')+'。機率為歷史統計估計，不代表保證報酬。</div>';
+  if(d.event_guard) h+='<div style="margin-top:7px;font-size:.78rem;color:var(--yellow)">⚠ 事件風險閘門：'+escapeHtml(d.event_guard)+'</div>';
   var miss=(d.display_missing||[]).concat(d.data_warnings||[]).filter(function(v,i,a){return v&&a.indexOf(v)===i;});
-  if (miss.length) h+='<div style="margin-top:5px;font-size:.74rem;color:var(--yellow)">⚠ '+escapeHtml(miss.join('、'))+'資料不完整，買進／加碼建議已自動保守降級。</div>';
+  if (miss.length) h+='<div style="margin-top:5px;font-size:.74rem;color:var(--yellow)">⚠ '+escapeHtml(miss.join('、'))+'資料不完整，積極訊號已自動保守降級。</div>';
   el.innerHTML=h;
 }
+
 
 
 // ===========================================================================
@@ -1098,6 +1083,8 @@ function renderBattleCard() {
 // ===========================================================================
 function renderAll() {
   G.tomorrowScenario = buildTomorrowScenario();
+  renderTodayReview();
+  renderEvents();
   renderBattleCard();
   renderDecision();
   renderStrategy();
@@ -1113,8 +1100,37 @@ function renderAll() {
   renderVerdict();
 }
 
+function renderTodayReview() {
+  var el=document.getElementById('todayBody'), t=G.techData;
+  if(!el||!t){return;}
+  var v=t.vol||{}, change=t.changePct;
+  var volumeText=v.status||'資料不足';
+  var eff=v.efficiency;
+  var push='量價推進效率資料不足';
+  if(eff!=null){ if(eff>0.8) push='價格推進效率佳'; else if(eff>0.25) push='價格推進效率普通'; else push='量能增加但價格推進效率偏弱，動能可能衰退'; }
+  var us='美股資料不足';
+  if(G.usData && G.usData.status===200){var arr=G.usData.data||[], sum=0;arr.forEach(function(x){sum+=Number(x.change_pct||0)});us=sum>0.5?'美股整體偏多，對隔日情緒有正向支撐':(sum<-0.5?'美股整體偏弱，隔日開盤需防守':'美股漲跌互見，影響中性');}
+  var h='<div class="battle-kpis"><div class="battle-kpi"><small>今日漲跌</small><strong class="'+colorVal(change)+'">'+(change>0?'+':'')+fmt(change,2)+'%</strong></div><div class="battle-kpi"><small>量能狀態</small><strong>'+escapeHtml(volumeText)+'</strong></div><div class="battle-kpi"><small>20日量比</small><strong>'+fmt(v.ratio,2)+'×</strong></div><div class="battle-kpi"><small>量價效率</small><strong>'+fmt(eff,3)+'</strong></div></div>';
+  h+='<div style="margin-top:10px;padding:10px;background:var(--card2);border-radius:8px"><b>今日復盤：</b>'+escapeHtml(push)+'</div>';
+  h+='<div style="margin-top:8px;padding:10px;background:var(--card2);border-radius:8px"><b>美股對明日：</b>'+escapeHtml(us)+'</div>';
+  el.innerHTML=h;
+}
+
+function renderEvents() {
+  var el=document.getElementById('eventBody'); if(!el)return;
+  var ev=G.eventData, t=G.techData||{}, f=t.financial||{};
+  var h='';
+  if(t.revenueYoy!=null) h+='<div class="indicator-row"><span class="ind-label">最新月營收年增率</span><span class="ind-value '+colorVal(t.revenueYoy)+'">'+(t.revenueYoy>0?'+':'')+fmt(t.revenueYoy,1)+'%</span></div>';
+  if(f.available){h+='<div class="indicator-row"><span class="ind-label">最新財報 EPS</span><span class="ind-value">'+fmt(f.eps,2)+'</span></div>'; if(f.eps_yoy!=null) h+='<div class="indicator-row"><span class="ind-label">EPS 同期變化</span><span class="ind-value '+colorVal(f.eps_yoy)+'">'+(f.eps_yoy>0?'+':'')+fmt(f.eps_yoy,1)+'%</span></div>';}
+  if(!ev||ev.status!==200){h+=errHtml((ev&&ev.msg)||'重大事件資料暫時無法取得');el.innerHTML=h;return;}
+  h+='<div style="margin:10px 0;padding:10px;border-radius:8px;background:var(--card2)"><b>事件風險：'+escapeHtml(ev.risk_level||'--')+'</b><div style="font-size:.82rem;color:var(--text-dim);margin-top:4px">'+escapeHtml(ev.summary||'')+'</div></div>';
+  var arr=ev.data||[]; if(!arr.length){h+='<div class="placeholder" style="padding:12px">近期未偵測到明顯重大事件關鍵字</div>';} else {arr.slice(0,6).forEach(function(x){var ic=x.impact==='高'?'impact-high':'impact-mid';h+='<div class="event-row"><div><span class="event-badge '+ic+'">'+escapeHtml(x.impact)+'影響</span><span class="news-tag '+(x.sentiment==='正面'?'tag-pos':(x.sentiment==='負面'?'tag-neg':'tag-neu'))+'">'+escapeHtml(x.sentiment)+'</span></div><div style="margin-top:5px;font-weight:600"><a href="'+escapeHtml(x.link||'#')+'" target="_blank">'+escapeHtml(x.title||'')+'</a></div><div class="news-meta"><span>'+escapeHtml(x.category||'')+'</span><span>'+escapeHtml(x.pubDate||'')+'</span></div></div>';});}
+  h+='<div style="font-size:.72rem;color:var(--text-dim);margin-top:8px">事件層用於風險降級，不會僅因單一新聞自動把買進訊號升級。</div>';
+  el.innerHTML=h;
+}
+
 // --- 策略燈號（短線3~5天 / 波段2~3週）---
-// --- 🎯 交易決策中心（V2.1 價格決策引擎）---
+// --- 🎯 交易決策中心（價格決策引擎）---
 function renderDecision() {
   var el = document.getElementById('decisionBody');
   var dec = G.techData && G.techData.decision;
