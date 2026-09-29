@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>台股分析系統 V2.9.4</title>
+<title>台股分析系統 V3.0.0</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -131,7 +131,7 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== HEADER ===================== -->
 <div class="header">
   <div class="header-top">
-    <h1>📊 台股分析系統 <span id="systemVersionBadge" style="font-size:.72rem;color:var(--text-dim)">V2.9.4</span></h1>
+    <h1>📊 台股分析系統 <span id="systemVersionBadge" style="font-size:.72rem;color:var(--text-dim)">V2.9.7</span></h1>
     <div class="report-time" id="reportTime"></div>
   </div>
   <div class="search-bar">
@@ -194,7 +194,6 @@ tr:last-child td{border-bottom:none}
   <section class="tab-panel" data-panel="tech">
     <div class="card"><div class="card-title"><span class="icon">📈</span>技術</div><div class="card-body" id="techBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
     <div class="card" style="margin-top:12px"><div class="card-title"><span class="icon">🚦</span>策略細節</div><div class="card-body" id="strategyBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
-    <details style="margin-top:12px"><summary style="cursor:pointer;color:var(--text-dim)">舊版價格決策細節</summary><div class="card" style="margin-top:8px"><div class="card-body" id="decisionBody"><div class="placeholder">輸入股票代號開始健診</div></div></div></details>
   </section>
   <section class="tab-panel" data-panel="chip">
     <div class="card"><div class="card-title"><span class="icon">💰</span>籌碼</div><div class="card-body" id="chipBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
@@ -357,11 +356,11 @@ function doSearch() {
     stockId: '', stockName: '', industry: '',
     prices: [], scores: { tech:0, fund:0, chip:0, us:0, total:0 },
     techData: null, v27: null, fundData: null, chipData: null,
-    usData: null, newsData: null, sectorData: null,
+    usData: null, newsData: null, sectorData: null, intradayData: null, taifexData: null,
   };
 
   // 顯示 loading
-  var bodies = ['battleBody','volumeBody','techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody','decisionBody'];
+  var bodies = ['battleBody','volumeBody','techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody'];
   bodies.forEach(function(id){
     document.getElementById(id).innerHTML = loadingHtml('載入中...');
   });
@@ -406,7 +405,7 @@ function doSearch() {
   infoPromise.then(function(){
     // V2.7.18：先由 /api/stock 一次取得技術/基本/籌碼模型，再並行抓外部展示資料，避免重複 API。
     return fetchTechData().then(function(){
-      return Promise.all([fetchFundData(), fetchChipData(), fetchSectorFlow(), fetchTopInstitutional(), fetchUSMarket(), fetchNews()]);
+      return Promise.all([fetchFundData(), fetchChipData(), fetchSectorFlow(), fetchTopInstitutional(), fetchUSMarket(), fetchNews(), fetchIntradayVolume(), fetchTaifexSentiment()]);
     });
   }).then(function(){
     // 資料載入完成後更新 header（name/industry 可能來自 /api/stock）
@@ -523,7 +522,8 @@ function fetchTechData() {
         chipModel: j.chip_model || null,
         threeCore: j.three_core || null,
         marketRules: j.market_rules || null,
-        policyEnvironment: j.policy_environment || null
+        policyEnvironment: j.policy_environment || null,
+        intradayVolume: j.intraday_volume || null
       };
       G.v27 = j.v27 || null;
       var vb = document.getElementById('systemVersionBadge');
@@ -577,6 +577,18 @@ function fetchNews() {
   }).catch(function(){ G.newsData = null; });
 }
 
+// --- 盤中量價時段（5 分鐘）---
+function fetchIntradayVolume() {
+  return fetch('/api/intraday_volume?symbol=' + encodeURIComponent(G.stockId)).then(function(r){ return r.json(); }).then(function(j){ G.intradayData = j; })
+    .catch(function(){ G.intradayData = (G.techData && G.techData.intradayVolume) || null; });
+}
+
+// --- TAIFEX 大盤情緒輔助 ---
+function fetchTaifexSentiment() {
+  return fetch('/api/taifex_sentiment').then(function(r){ return r.json(); }).then(function(j){ G.taifexData = j; })
+    .catch(function(){ G.taifexData = null; });
+}
+
 // ===========================================================================
 // 技術面計算 — 已移至後端 /api/stock，前端直接使用回傳結果
 // ===========================================================================
@@ -610,6 +622,15 @@ function calcOpenBias(v27, us){
   return {label:'平盤附近', note:'海外與個股訊號未形成明顯單邊'};
 }
 
+
+function plainStrength(v){
+  var n=Number(v);
+  if(!isFinite(n)) return '資料不足';
+  if(n>=70) return '高';
+  if(n>=50) return '中等';
+  return '低';
+}
+
 function zoneText(z){
   if(!z || z.low == null || z.high == null) return '--';
   return fmt(z.low) + '～' + fmt(z.high);
@@ -626,7 +647,10 @@ function renderBattle(){
   var mainColor = (mainLabel.indexOf('停損')>=0||mainLabel.indexOf('減碼')>=0) ? 'var(--green)' : (mainLabel.indexOf('進場')>=0||mainLabel.indexOf('續抱')>=0||mainLabel.indexOf('加碼')>=0 ? 'var(--red)' : 'var(--yellow)');
   var open=calcOpenBias(v,G.usData);
   var remain='--';
-  if(p.remaining_upside_pct){ remain='+'+fmt(p.remaining_upside_pct.low,1)+'%～+'+fmt(p.remaining_upside_pct.high,1)+'%'; }
+  var modelRemain=p.model_remaining_upside_pct||p.remaining_upside_pct;
+  if(modelRemain){ remain='+'+fmt(modelRemain.low,1)+'%～+'+fmt(modelRemain.high,1)+'%'; }
+  var legalRemain=(p.daily_legal_upside_pct!=null)?('+'+fmt(p.daily_legal_upside_pct,1)+'%'):'--';
+  var strength=(dir.signal_strength!=null?dir.signal_strength:dir.confidence);
   var html='<div class="battle-hero">';
   html+='<div style="text-align:center;color:var(--text-dim);font-size:.78rem">目前策略</div><div class="battle-action" style="color:'+mainColor+'">'+mainLabel+'</div>';
   html+='<div class="decision-split"><div><div class="k">空手</div><div class="v">'+((d.cash&&d.cash.label)||'--')+'</div></div><div><div class="k">持股</div><div class="v">'+((d.holder&&d.holder.label)||'--')+'</div></div><div><div class="k">加碼</div><div class="v">'+(d.add_state||'--')+'</div></div></div>';
@@ -637,21 +661,23 @@ function renderBattle(){
   html+='<div class="battle-kpi"><div class="k">'+pxLabel+'</div><div class="v mono">'+fmt(px)+'</div></div>';
   html+='<div class="battle-kpi"><div class="k">隔日方向</div><div class="v">'+(dir.label||'--')+'</div></div>';
   html+='<div class="battle-kpi"><div class="k">隔日開盤</div><div class="v">'+open.label+'</div></div>';
-  html+='<div class="battle-kpi"><div class="k">模型信心</div><div class="v mono">'+fmt(dir.confidence,0)+'/100</div></div>';
-  html+='<div class="battle-kpi"><div class="k">上漲／震盪／下跌</div><div class="v mono" style="font-size:.85rem">'+fmt(dir.up_probability,1)+'% / '+fmt(dir.sideways_probability,1)+'% / '+fmt(dir.down_probability,1)+'%</div></div>';
-  html+='<div class="battle-kpi"><div class="k">預估剩餘空間</div><div class="v mono">'+remain+'</div></div>';
+  html+='<div class="battle-kpi"><div class="k">判斷強度</div><div class="v">'+(dir.signal_strength_level||'--')+'</div></div>';
+  html+='<div class="battle-kpi"><div class="k">模型合理上漲空間</div><div class="v mono">'+remain+'</div></div>';
   html+='</div>';
   var lim=p.daily_limits||{};
   var limitPrefix=lim.estimated?'估算':'今日';
-  html+='<table style="margin-top:12px"><tr><th>'+limitPrefix+'漲停價</th><td class="mono pos">'+fmt(lim.limit_up)+'</td></tr><tr><th>'+limitPrefix+'跌停價</th><td class="mono neg">'+fmt(lim.limit_down)+'</td></tr><tr><th>理想進場區</th><td class="mono">'+zoneText(p.entry_zone)+'</td></tr><tr><th>加碼區</th><td class="mono">'+zoneText(p.add_zone)+'</td></tr><tr><th>防守位</th><td class="mono">'+fmt(p.defense)+'</td></tr><tr><th>停損位</th><td class="mono neg">'+fmt(p.stop_loss)+'</td></tr><tr><th>第一目標</th><td class="mono pos">'+fmt(p.target_1)+'</td></tr><tr><th>第二目標</th><td class="mono pos">'+fmt(p.target_2)+'</td></tr></table>';
+  html+='<table style="margin-top:12px"><tr><th>'+limitPrefix+'漲停價</th><td class="mono pos">'+fmt(lim.limit_up)+'</td></tr><tr><th>'+limitPrefix+'跌停價</th><td class="mono neg">'+fmt(lim.limit_down)+'</td></tr><tr><th>今日法定上漲空間</th><td class="mono">'+legalRemain+'</td></tr><tr><th>理想進場區</th><td class="mono">'+zoneText(p.entry_zone)+'</td></tr><tr><th>加碼區</th><td class="mono">'+zoneText(p.add_zone)+'</td></tr><tr><th>防守位</th><td class="mono">'+fmt(p.defense)+'</td></tr><tr><th>停損位</th><td class="mono neg">'+fmt(p.stop_loss)+'</td></tr><tr><th>第一目標</th><td class="mono pos">'+fmt(p.target_1)+'</td></tr><tr><th>第二目標</th><td class="mono pos">'+fmt(p.target_2)+'</td></tr></table>';
   if(lim.estimated) html+='<div style="margin-top:6px;font-size:.7rem;color:var(--text-dim)">交易所即時漲跌停欄位未取得，才依一般普通股 ±10% 與升降單位估算；特殊交易日仍以交易所公告為準。</div>';
-  else html+='<div style="margin-top:6px;font-size:.7rem;color:var(--text-dim)">漲跌停價採交易所當日參考價／官方即時欄位。</div>';
+  else html+='<div style="margin-top:6px;font-size:.7rem;color:var(--text-dim)">漲跌停價採交易所當日參考價／官方即時欄位；第一、第二目標為跨日策略目標，不以單日漲停價裁切。</div>';
+  var iv=G.intradayData||t.intradayVolume||{};
+  if(iv&&iv.available) html+='<div class="battle-note '+((iv.impact_code==='RISK'||iv.impact_code==='CAUTION')?'battle-risk':'')+'"><b>今日量價：</b>'+escapeHtml(iv.impact||'中性')+'｜'+escapeHtml(iv.note||'')+'</div>';
+  var sf=G.sectorData;
+  if(sf&&sf.all_sectors&&G.industry){ var rows=sf.all_sectors||[], idx=-1; for(var si=0;si<rows.length;si++){ if(rows[si].industry===G.industry){idx=si;break;} } if(idx>=0){ var pctl=(idx+1)/rows.length; var rankLabel=pctl<=0.33?'資金前段':(pctl>=0.67?'資金後段':'資金中段'); html+='<div class="battle-note"><b>產業資金：</b>'+escapeHtml(G.industry)+'｜'+rankLabel+'（法人淨流向相對位置）</div>'; } }
+  var tx=G.taifexData; if(tx&&tx.available) html+='<div class="battle-note"><b>大盤衍生品：</b>'+escapeHtml(tx.label||'--')+'（僅作市場背景）</div>';
   html+='<div class="battle-note"><b>主要原因：</b>'+((d.reasons&&d.reasons.length)?d.reasons.join('；'):'目前訊號不足，維持等待。')+'</div>';
   html+='<div class="battle-note battle-risk"><b>主要風險：</b>'+((d.risks&&d.risks.length)?d.risks.join('；'):'目前未偵測到高優先風險否決條件。')+'</div>';
   if(d.invalidation) html+='<div class="battle-note"><b>失效條件：</b>'+d.invalidation+'</div>';
-  var sg=v.stability_gate||{};
-  var gateText = sg.passed===true ? 'V2.8上線門檻：通過' : (sg.passed===false ? 'V2.8上線門檻：未完全通過' : '');
-  html+='<div style="margin-top:10px;font-size:.74rem;color:var(--text-dim)">資料品質 '+fmt(dq.score,0)+'/100（'+(dq.state||'--')+'）｜市場：'+(rg.label||'--')+(gateText?'｜'+gateText:'')+'｜'+(dir.probability_type||'')+'。機率為模型估計，不代表保證。</div>';
+  html+='<div style="margin-top:10px;font-size:.74rem;color:var(--text-dim)">資料狀態：'+(dq.state||'--')+'｜市場：'+(rg.label||'--')+'｜模型合理上漲空間依技術壓力、ATR與估值參考計算，與今日法定漲停空間分開。</div>';
   html+='</div>';
   el.innerHTML=html;
 }
@@ -659,11 +685,19 @@ function renderBattle(){
 function renderVolume(){
   var el=document.getElementById('volumeBody'), t=G.techData;
   if(!t){el.innerHTML='<div class="placeholder">輸入股票代號開始分析</div>';return;}
-  var dec=t.decision||{}, va=dec.volume_analysis||{};
-  var html='<table><tr><th>量價狀態</th><td><b>'+(va.status||t.vol.status||'資料不足')+'</b></td></tr><tr><th>20日均量比</th><td class="mono">'+fmt(va.volume_ratio_20!=null?va.volume_ratio_20:t.vol.ratio,2)+' 倍</td></tr><tr><th>當日漲跌</th><td class="mono">'+fmt(va.price_change_pct!=null?va.price_change_pct:t.changePct,2)+'%</td></tr><tr><th>價格推進效率</th><td class="mono">'+fmt(va.efficiency,3)+'</td></tr></table>';
-  if(va.status==='大量不漲') html+='<div class="battle-note battle-risk">量能明顯增加，但價格推進有限，代表上方賣壓可能增加；系統會降低追價與加碼權重。</div>';
-  else if(va.status==='放量下跌') html+='<div class="battle-note battle-risk">放量下跌屬高風險量價結構，優先檢查防守與停損條件。</div>';
-  else html+='<div class="battle-note">量價頁只顯示投資人需要的結論；詳細公式留在後台運算。</div>';
+  var dec=t.decision||{}, va=dec.volume_analysis||{}, iv=G.intradayData||t.intradayVolume||{};
+  var html='<table><tr><th>今日量能</th><td><b>'+escapeHtml(va.status||t.vol.status||'資料不足')+'</b></td></tr><tr><th>20日均量比</th><td class="mono">'+fmt(va.volume_ratio_20!=null?va.volume_ratio_20:t.vol.ratio,2)+' 倍</td></tr><tr><th>今日漲跌</th><td class="mono">'+fmt(va.price_change_pct!=null?va.price_change_pct:t.changePct,2)+'%</td></tr></table>';
+  if(iv&&iv.available){
+    html+='<div class="battle-note"><b>盤中量價：</b>'+escapeHtml(iv.impact||'中性')+'｜量能主要集中：'+escapeHtml(iv.volume_concentration||'--')+'</div>';
+    html+='<table style="margin-top:8px"><tr><th>時段</th><th>成交量</th><th>全日占比</th><th>價格變化</th></tr>';
+    (iv.segments||[]).forEach(function(x){ html+='<tr><td>'+escapeHtml(x.name||'--')+'</td><td class="mono">'+fmtInt(x.volume_lots)+' 張</td><td class="mono">'+fmt(x.share_pct,1)+'%</td><td class="mono">'+fmt(x.price_change_pct,2)+'%</td></tr>'; });
+    html+='</table>';
+    var a=iv.anomalies||[];
+    if(a.length){ html+='<div style="margin-top:10px;font-weight:700">異常量價時段</div>'; a.slice(0,3).forEach(function(x){ html+='<div class="indicator-row"><span class="ind-label">'+escapeHtml(x.time)+'｜'+escapeHtml(x.label)+'</span><span class="ind-value">'+fmtInt(x.volume_lots)+' 張｜同時段 '+fmt(x.same_time_ratio,1)+' 倍</span></div>'; }); }
+    else html+='<div class="battle-note">今日未偵測到明顯異常的 5 分鐘量價時段。</div>';
+    if(iv.note) html+='<div class="battle-note '+((iv.impact_code==='RISK'||iv.impact_code==='CAUTION')?'battle-risk':'')+'"><b>明日量價提醒：</b>'+escapeHtml(iv.note)+'</div>';
+    html+='<div style="font-size:.72rem;color:var(--text-dim);margin-top:8px">'+escapeHtml(iv.method||'')+' 原始數值只用來判斷量價結構，不當成上漲機率。</div>';
+  } else html+='<div class="battle-note">盤中 5 分鐘資料暫時無法取得；缺資料不補分，也不影響其他核心模型。</div>';
   el.innerHTML=html;
 }
 
@@ -675,7 +709,6 @@ function renderAll() {
   renderMarketRules();
   renderBattle();
   renderVolume();
-  renderDecision();
   renderStrategy();
   renderValuation();
   renderPosition();
@@ -686,165 +719,9 @@ function renderAll() {
   renderTopInst();
   renderUS();
   renderNews();
-  renderVerdict();
 }
 
 // --- 策略燈號（短線3~5天 / 波段2~3週）---
-// --- 🎯 交易決策中心（V2.1 價格決策引擎）---
-function renderDecision() {
-  var el = document.getElementById('decisionBody');
-  var dec = G.techData && G.techData.decision;
-  if (!G.techData) { el.innerHTML = '<div class="placeholder">輸入股票代號開始健診</div>'; return; }
-  if (!dec) { el.innerHTML = errHtml('價格決策引擎資料不足，無法計算'); return; }
-
-  var colorMap = {
-    BUY: 'var(--red)', ADD: 'var(--blue)', HOLD: 'var(--red)',
-    WAIT: 'var(--yellow)', REDUCE: 'var(--orange)',
-    STOP: 'var(--green)', NO_TRADE: 'var(--green)'
-  };
-  // 若有輸入買入價，以「持股價格分析」算出的最終裁決（已考慮個人成本+風險優先權）為準
-  var pos = G.techData.position;
-  var finalAction = (pos && pos.final_action) ? pos.final_action : dec.action;
-  var finalLabel = (pos && pos.final_label) ? pos.final_label : dec.label;
-  var color = colorMap[finalAction] || 'var(--text-dim)';
-
-  var html = '<div style="text-align:center;font-size:1.4rem;font-weight:700;color:' + color + ';margin-bottom:4px">' + finalLabel + '</div>';
-  html += '<div style="text-align:center;font-size:.85rem;color:var(--text-dim);margin-bottom:12px">買入評分 ' + dec.score + '/100　｜　信心度 ' + dec.confidence.score + '/100（' + dec.confidence.level + '）</div>';
-
-  if (dec.volume_analysis) {
-    var va = dec.volume_analysis;
-    html += '<table style="margin-bottom:10px">';
-    html += '<tr><th>20日量比</th><td class="mono">' + fmt(va.volume_ratio_20) + ' 倍</td></tr>';
-    html += '<tr><th>量價狀態</th><td>' + (va.status || '資料不足') + '</td></tr>';
-    html += '<tr><th>量價效率</th><td class="mono">' + fmt(va.efficiency,3) + '</td></tr>';
-    html += '</table>';
-  }
-
-  var pd = dec.price_decision;
-
-  if (pd.buy) {
-    html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">🎯 核心買點（價格精度 ' + pd.buy.precision + '級 ±' + fmt(pd.buy.tolerance_pct,1) + '%）</div>';
-    html += '<table style="margin-bottom:10px">';
-    html += '<tr><th>核心買點</th><td class="mono pos">' + fmt(pd.buy.core) + '</td></tr>';
-    html += '<tr><th>最佳執行區</th><td class="mono">' + fmt(pd.buy.zone_low) + ' ～ ' + fmt(pd.buy.zone_high) + '</td></tr>';
-    html += '</table>';
-  }
-
-  if (pd.add && pd.add.type) {
-    var addTypeLabel = { PULLBACK: '🔵 回踩補倉', BREAKOUT: '🔵 突破補倉', TREND: '🔵 趨勢加碼', BLOCKED: '🔴 禁止補倉' }[pd.add.type] || pd.add.type;
-    html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">' + addTypeLabel + '</div>';
-    if (pd.add.type !== 'BLOCKED') {
-      html += '<table style="margin-bottom:10px">';
-      html += '<tr><th>補倉核心價</th><td class="mono pos">' + fmt(pd.add.core) + '</td></tr>';
-      html += '<tr><th>執行區</th><td class="mono">' + fmt(pd.add.low) + ' ～ ' + fmt(pd.add.high) + '</td></tr>';
-      html += '</table>';
-      if (pd.add.note) html += '<div style="color:var(--yellow);font-size:.85rem;margin-bottom:10px">' + pd.add.note + '</div>';
-    } else {
-      html += '<div style="color:var(--green);font-size:.9rem;margin-bottom:10px">' + (pd.add.reasons[0] || '目前不建議補倉') + '</div>';
-    }
-  }
-
-  if (pd.risk) {
-    html += '<table style="margin-bottom:10px">';
-    html += '<tr><th>停損價</th><td class="mono neg">' + fmt(pd.risk.stop) + (pd.risk.warning_triggered ? ' <span style="color:var(--orange)">⚠已接近</span>' : '') + '</td></tr>';
-    html += '</table>';
-  }
-
-  if (pd.profit) {
-    html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">🟢 停利規劃</div>';
-    html += '<table style="margin-bottom:10px">';
-    if (pd.profit.target1 != null) html += '<tr><th>第一停利</th><td class="mono pos">' + fmt(pd.profit.target1) + '（建議減碼20~30%）</td></tr>';
-    if (pd.profit.target2 != null) html += '<tr><th>第二停利</th><td class="mono pos">' + fmt(pd.profit.target2) + '（再減碼30~50%）</td></tr>';
-    if (pd.profit.trailing != null) html += '<tr><th>移動停利</th><td class="mono">' + fmt(pd.profit.trailing) + '（剩餘部位）</td></tr>';
-    html += '</table>';
-  }
-
-  if (dec.no_trade_reasons && dec.no_trade_reasons.length) {
-    html += '<div style="background:var(--card2);border-radius:8px;padding:10px;margin-bottom:8px;color:var(--green)">⛔ 禁止交易原因：' + dec.no_trade_reasons.join('；') + '</div>';
-  }
-
-  if (dec.reasons && dec.reasons.length) {
-    html += '<details style="margin-top:4px"><summary style="cursor:pointer;color:var(--blue);font-size:.9rem">為什麼？（點開看理由）</summary>';
-    html += '<ul style="margin:8px 0 0 20px;font-size:.85rem;color:var(--text-dim)">';
-    dec.reasons.forEach(function(r){ html += '<li>✓ ' + r + '</li>'; });
-    html += '</ul></details>';
-  }
-
-  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:10px">＊ 這是依技術面規則計算的價格決策參考，±1%為執行容忍區間非預測保證，不構成投資建議</div>';
-
-  el.innerHTML = html;
-}
-
-
-function renderStrategy() {
-  var el = document.getElementById('strategyBody');
-  var s = G.techData && G.techData.strategy;
-  if (!s) {
-    el.innerHTML = '<div class="placeholder">無策略訊號資料</div>';
-    return;
-  }
-
-  var lightMap = {
-    green: { label: '🟢 綠燈（多頭共振）', color: 'var(--red)' },
-    red:   { label: '🔴 紅燈（警戒過熱）', color: 'var(--orange)' },
-    gray:  { label: '⚪ 灰燈（觀望期）', color: 'var(--text-dim)' },
-    neutral: { label: '🟡 中性（訊號不明確）', color: 'var(--yellow)' }
-  };
-  var lm = lightMap[s.light] || lightMap.neutral;
-
-  var html = '<div style="font-size:1.1rem;font-weight:700;margin-bottom:10px;color:' + lm.color + '">' + lm.label + '</div>';
-
-  function actionCls(action) {
-    if (action.indexOf('買進') >= 0) return 'pos';
-    if (action.indexOf('停損') >= 0 || action.indexOf('賣出') >= 0 || action.indexOf('了結') >= 0 || action.indexOf('結清') >= 0) return 'neg';
-    return '';
-  }
-
-  html += '<div style="padding:10px;border-radius:8px;background:var(--card2);margin-bottom:8px">';
-  html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">短線戰法（3~5天，KD(5,3,3)）</div>';
-  html += '<div class="mono ' + actionCls(s.short.action) + '" style="font-weight:700;margin-bottom:6px">' + s.short.action + '</div>';
-  html += '<ul style="margin:0;padding-left:18px;font-size:.85rem;color:var(--text-dim)">';
-  s.short.reasons.forEach(function(r){ html += '<li>' + r + '</li>'; });
-  html += '</ul></div>';
-
-  html += '<div style="padding:10px;border-radius:8px;background:var(--card2)">';
-  html += '<div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">波段戰法（2~3週，週KD(9,3,3)＋日KD(9,3,3)）</div>';
-  html += '<div class="mono ' + actionCls(s.mid.action) + '" style="font-weight:700;margin-bottom:6px">' + s.mid.action + '</div>';
-  html += '<ul style="margin:0;padding-left:18px;font-size:.85rem;color:var(--text-dim)">';
-  s.mid.reasons.forEach(function(r){ html += '<li>' + r + '</li>'; });
-  html += '</ul></div>';
-
-  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 訊號僅供參考，不構成投資建議；本版本不包含股票池／產業篩選功能</div>';
-
-  el.innerHTML = html;
-}
-
-// --- 估值分析（階段1：合理價格區間，簡化版 P/E Band）---
-function renderValuation() {
-  var el = document.getElementById('valuationBody');
-  var v = G.techData && G.techData.valuation;
-  if (!G.techData) { el.innerHTML = '<div class="placeholder">輸入股票代號開始健診</div>'; return; }
-  if (!v) {
-    el.innerHTML = errHtml('本益比歷史資料不足，無法計算估值區間');
-    return;
-  }
-  if (v._error) {
-    el.innerHTML = errHtml(v.msg || '無法計算估值區間');
-    return;
-  }
-  var html = '<table style="margin-bottom:8px">';
-  html += '<tr><th>近期反推EPS</th><td class="mono">' + fmt(v.eps) + '</td></tr>';
-  html += '<tr><th>歷史本益比</th><td class="mono">' + fmt(v.pe_low,1) + ' ～ ' + fmt(v.pe_avg,1) + ' ～ ' + fmt(v.pe_high,1) + '（低／均／高）</td></tr>';
-  html += '<tr><th>合理價格</th><td class="mono">' + fmt(v.reasonable_price) + '</td></tr>';
-  html += '<tr><th>合理買入上限</th><td class="mono pos">' + fmt(v.buy_ceiling) + '</td></tr>';
-  html += '<tr><th>估值目標價</th><td class="mono neg">' + fmt(v.target_price) + '</td></tr>';
-  html += '<tr><th>目前區間</th><td><b>' + v.zone + '</b></td></tr>';
-  html += '</table>';
-  html += '<div style="font-size:.75rem;color:var(--text-dim)">＊ 免費資料無「分析師預估EPS」，以近期本益比反推的EPS替代，僅供參考，非投資建議</div>';
-  el.innerHTML = html;
-}
-
-// --- 持股價格分析（選填輸入買入價，不存檔，當下即時分析）---
 function renderPosition() {
   var el = document.getElementById('positionBody');
   var p = G.techData && G.techData.position;
@@ -1008,12 +885,14 @@ function renderMarketRules(){
 function renderThreeCore(){
   var el=document.getElementById('threeCoreBody'); if(!el)return;
   var c=G.techData&&G.techData.threeCore;
-  if(!c){el.innerHTML='<div class="placeholder">三核心模型資料不足</div>';return;}
-  function tag(name,v){var cls=v>=58?'pos':(v<43?'neg':'neutral');return '<div class="indicator-row"><span class="ind-label">'+name+'</span><span class="ind-value '+cls+'">'+fmt(v,1)+'/100</span></div>';}
-  var html='<div style="font-size:1.05rem;font-weight:800;margin-bottom:8px">'+(c.label||'--')+'｜'+fmt(c.score,1)+'/100</div>';
-  html+=tag('📈 基本面',c.fundamental)+tag('📊 技術面',c.technical)+tag('👥 籌碼面',c.chip);
+  if(!c){el.innerHTML='<div class="placeholder">核心資料不足</div>';return;}
+  function state(v){ if(v==null)return '資料不足'; return v>=58?'偏強':(v<43?'偏弱':'中性'); }
+  var html='<div style="font-size:1.05rem;font-weight:800;margin-bottom:8px">'+(c.label||'--')+'</div>';
+  html+='<div class="indicator-row"><span class="ind-label">📈 基本面</span><span class="ind-value">'+state(c.fundamental)+'</span></div>';
+  html+='<div class="indicator-row"><span class="ind-label">📊 技術面</span><span class="ind-value">'+state(c.technical)+'</span></div>';
+  html+='<div class="indicator-row"><span class="ind-label">👥 籌碼面</span><span class="ind-value">'+state(c.chip)+'</span></div>';
   if(c.conflicts&&c.conflicts.length) html+='<div style="margin-top:8px;color:var(--text-dim)">'+c.conflicts.join('；')+'</div>';
-  html+='<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">短線權重：基本25%／技術40%／籌碼35%；波段：基本45%／技術30%／籌碼25%。停損與重大風險仍有最高優先權。</div>';
+  html+='<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">前台只呈現偏強／中性／偏弱；原始分數留在後台供模型驗證。權重屬可驗證基準，不視為固定真理。</div>';
   el.innerHTML=html;
 }
 
@@ -1027,9 +906,9 @@ function renderFund() {
   html += '<div class="verdict-label">基本面：'+(m.label||'--')+'</div><div class="verdict-score">綜合品質 '+fmt(m.score,1)+'/100</div></div>';
   var b=m.business||{}, f=m.financial||{}, v=m.valuation_expectation||{};
   html += '<table style="margin-top:8px">';
-  html += '<tr><th>商業模式／護城河代理</th><td>'+ (b.label||'--') +'（'+fmt(b.score,1)+'）</td></tr>';
-  html += '<tr><th>財務體質</th><td>'+ (f.label||'--') +'（'+fmt(f.score,1)+'）</td></tr>';
-  html += '<tr><th>估值</th><td>'+ (v.label||'--') +'（'+fmt(v.score,1)+'）</td></tr>';
+  html += '<tr><th>商業模式</th><td>'+ (b.label||'--') +'</td></tr>';
+  html += '<tr><th>財務體質</th><td>'+ (f.label||'--') +'</td></tr>';
+  html += '<tr><th>估值</th><td>'+ (v.label||'--') +'</td></tr>';
   html += '<tr><th>預期差</th><td>'+ (v.expectation_gap_label||'--') + (v.expectation_gap!=null?' '+(v.expectation_gap>0?'+':'')+fmt(v.expectation_gap,1):'') +'</td></tr>';
   html += '</table>';
   if (b.summary) html += '<div style="margin-top:10px;font-size:.82rem;line-height:1.6;color:var(--text-dim)"><b>核心業務：</b>'+escapeHtml(b.summary)+'</div>';
@@ -1041,7 +920,7 @@ function renderFund() {
   var strengths=(f.strengths||[]).concat(b.reasons||[]).slice(0,4), risks=(f.risks||[]).concat(b.risks||[]).concat(v.risks||[]).slice(0,5);
   if(strengths.length) html+='<div style="margin-top:10px"><b>優勢：</b>'+strengths.join('、')+'</div>';
   if(risks.length) html+='<div style="margin-top:6px;color:var(--text-dim)"><b>風險：</b>'+risks.join('、')+'</div>';
-  html+='<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 護城河與客戶替換難度採代理模型；資料不足不會硬補分。財務資料來源以 Yahoo Finance/yfinance 與既有 FinMind 營收資料交叉使用。</div>';
+  html+='<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">＊ 沒有可靠資料的護城河、客戶集中度等質化項目不硬算分數；缺值不補分，避免假精準。</div>';
   el.innerHTML=html;
 }
 
@@ -1474,7 +1353,7 @@ function runBacktest() {
 
 
 // ===========================================================================
-// V2.9.4 AI 自主分析小助手（前台只顯示必要說明；完整運算留在後台）
+// V2.9.7 AI 自主分析小助手（前台只顯示必要說明；完整運算留在後台）
 // ===========================================================================
 function loadAiHelper(){
   var st=document.getElementById('aiHelperStatus');
@@ -1503,7 +1382,7 @@ function loadAiHelper(){
       '<div class="battle-kpi"><div class="k">美股影響</div><div class="v">'+(s.us_impact||'—')+'</div></div>'+
       '<div class="battle-kpi"><div class="k">海外資料</div><div class="v">'+(s.overseas_data||'—')+'</div></div>'+
       '<div class="battle-kpi"><div class="k">政策／地緣風險</div><div class="v">'+(s.geo_policy_risk||'—')+'</div></div>'+
-      '<div class="battle-kpi"><div class="k">信心度</div><div class="v">'+(s.confidence!=null?s.confidence+'%':'—')+'</div></div></div>'+
+      '<div class="battle-kpi"><div class="k">判斷強度</div><div class="v">'+plainStrength(s.confidence)+'</div></div></div>'+
       '<div class="battle-note battle-risk">'+(s.main_risk||'目前無重大新增風險')+'</div>'+
       '<div class="battle-note">'+(s.assistant_note||'')+'</div>';
   }).catch(function(e){
