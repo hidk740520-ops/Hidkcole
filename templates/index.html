@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>台股分析系統 V2.8.0</title>
+<title>台股分析系統 V2.8.2</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -131,7 +131,7 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== HEADER ===================== -->
 <div class="header">
   <div class="header-top">
-    <h1>📊 台股分析系統 <span id="systemVersionBadge" style="font-size:.72rem;color:var(--text-dim)">V2.8.0</span></h1>
+    <h1>📊 台股分析系統 <span id="systemVersionBadge" style="font-size:.72rem;color:var(--text-dim)">V2.8.2</span></h1>
     <div class="report-time" id="reportTime"></div>
   </div>
   <div class="search-bar">
@@ -145,8 +145,12 @@ tr:last-child td{border-bottom:none}
   <div style="margin-top:8px;font-size:.85rem;color:var(--text-dim);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <label for="buyPriceInput">我的買入價（選填，不存檔，僅供本次分析）：</label>
     <input type="number" step="0.01" id="buyPriceInput" placeholder="例如 1050" style="width:100px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
-    <label for="sharesInput">張數（可小數，零股如100股請填0.1）：</label>
-    <input type="number" step="0.001" id="sharesInput" placeholder="例如 1 或 0.1" style="width:110px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
+    <label for="lotsInput">整張數：</label>
+    <input type="number" min="0" step="1" id="lotsInput" placeholder="例如 1" style="width:78px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
+    <label for="oddSharesInput">零股：</label>
+    <input type="number" min="0" max="999" step="1" id="oddSharesInput" placeholder="例如 200" style="width:88px;background:var(--card2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:4px 8px">
+    <span>股</span>
+    <span id="shareTotalHint" style="color:var(--text-dim);font-size:.78rem">合計 0 股</span>
     <label><input type="radio" name="strategyPref" value="short" checked> 短線</label>
     <label><input type="radio" name="strategyPref" value="mid"> 波段</label>
   </div>
@@ -162,6 +166,7 @@ tr:last-child td{border-bottom:none}
     <button class="tab-btn" data-tab="fund">基本</button>
     <button class="tab-btn" data-tab="valuation">估值</button>
     <button class="tab-btn" data-tab="news">新聞事件</button>
+    <button class="tab-btn" data-tab="aihelper">AI 小助手</button>
   </div>
 
   <section class="tab-panel active" data-panel="battle">
@@ -172,6 +177,10 @@ tr:last-child td{border-bottom:none}
     <div class="card" style="margin-bottom:12px">
       <div class="card-title"><span class="icon">🧭</span>三大核心</div>
       <div class="card-body" id="threeCoreBody"><div class="placeholder">輸入股票代號開始分析</div></div>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title"><span class="icon">⚖️</span>台股制度／政策環境</div>
+      <div class="card-body" id="marketRulesBody"><div class="placeholder">輸入股票代號開始分析</div></div>
     </div>
     <div class="card">
       <div class="card-title"><span class="icon">📌</span>持股價格分析</div>
@@ -201,6 +210,16 @@ tr:last-child td{border-bottom:none}
   <section class="tab-panel" data-panel="news">
     <div class="card"><div class="card-title"><span class="icon">📰</span>新聞事件</div><div class="card-body" id="newsBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
     <div class="card" style="margin-top:12px"><div class="card-title"><span class="icon">🇺🇸</span>海外市場</div><div class="card-body" id="usBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
+  </section>
+  <section class="tab-panel" data-panel="aihelper">
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title"><span class="icon">🧠</span>AI 自主分析小助手</div>
+      <div class="card-body" id="aiHelperStatus"><div class="placeholder">正在讀取學習狀態…</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title"><span class="icon">🌅</span>最新台股晨報</div>
+      <div class="card-body" id="aiHelperReport"><div class="placeholder">正在讀取最新報告…</div></div>
+    </div>
   </section>
 
   <div style="display:none">
@@ -410,6 +429,35 @@ function doSearch() {
   });
 }
 
+
+function getTotalShareCount() {
+  var lotsEl = document.getElementById('lotsInput');
+  var oddEl = document.getElementById('oddSharesInput');
+  var lots = lotsEl ? parseInt(lotsEl.value || '0', 10) : 0;
+  var odd = oddEl ? parseInt(oddEl.value || '0', 10) : 0;
+  if (!Number.isFinite(lots) || lots < 0) lots = 0;
+  if (!Number.isFinite(odd) || odd < 0) odd = 0;
+  // 零股欄位限制 0~999；超過時自動進位到整張，避免使用者輸入錯誤。
+  if (odd >= 1000) {
+    lots += Math.floor(odd / 1000);
+    odd = odd % 1000;
+    if (lotsEl) lotsEl.value = lots;
+    if (oddEl) oddEl.value = odd;
+  }
+  var total = lots * 1000 + odd;
+  var hint = document.getElementById('shareTotalHint');
+  if (hint) hint.textContent = '合計 ' + total.toLocaleString('zh-TW') + ' 股';
+  return total;
+}
+
+(function bindShareInputs(){
+  ['lotsInput','oddSharesInput'].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('input', getTotalShareCount);
+  });
+  getTotalShareCount();
+})();
+
 // ===========================================================================
 // 資料抓取
 // ===========================================================================
@@ -422,8 +470,8 @@ function fetchTechData() {
   var buyPrice = document.getElementById('buyPriceInput').value;
   if (buyPrice) {
     url += '&buy_price=' + encodeURIComponent(buyPrice);
-    var shares = document.getElementById('sharesInput').value;
-    if (shares) url += '&shares=' + encodeURIComponent(shares);
+    var totalShares = getTotalShareCount();
+    if (totalShares > 0) url += '&share_count=' + encodeURIComponent(totalShares);
   }
   var radios = document.getElementsByName('strategyPref');
   var strategyPref = 'short';
@@ -468,7 +516,9 @@ function fetchTechData() {
         fundamentalModel: j.fundamental_model || null,
         technicalCore: j.technical_core || null,
         chipModel: j.chip_model || null,
-        threeCore: j.three_core || null
+        threeCore: j.three_core || null,
+        marketRules: j.market_rules || null,
+        policyEnvironment: j.policy_environment || null
       };
       G.v27 = j.v27 || null;
       var vb = document.getElementById('systemVersionBadge');
@@ -612,6 +662,7 @@ function renderVolume(){
 // ===========================================================================
 function renderAll() {
   renderThreeCore();
+  renderMarketRules();
   renderBattle();
   renderVolume();
   renderDecision();
@@ -828,6 +879,7 @@ function renderPosition() {
   html += '<table style="margin-bottom:8px">';
   html += '<tr><th>買入價</th><td class="mono">' + fmt(buyPriceVal) + '</td></tr>';
   html += '<tr><th>目前價</th><td class="mono">' + fmt(G.techData.lastClose) + '</td></tr>';
+  if (p.share_count != null) html += '<tr><th>持有股數</th><td class="mono">' + Number(p.share_count).toLocaleString('zh-TW') + ' 股</td></tr>';
   if (p.profit_pct != null) {
     var pCls = p.profit_pct > 0 ? 'pos' : (p.profit_pct < 0 ? 'neg' : 'neutral');
     var pSign = p.profit_pct > 0 ? '+' : '';
@@ -917,6 +969,30 @@ function renderTech() {
   html += '<div style="margin-top:8px">技術面評分 ' + scoreBadge(t.score, t.scoreMax) + '</div>';
 
   el.innerHTML = html;
+}
+
+function renderMarketRules(){
+  var el=document.getElementById('marketRulesBody'); if(!el)return;
+  var r=G.techData&&G.techData.marketRules, p=G.techData&&G.techData.policyEnvironment;
+  if(!r){el.innerHTML='<div class="placeholder">台股制度資料不足</div>';return;}
+  var lim=r.daily_limits||{}, ses=r.session||{};
+  var status=r.security_status||'未自動驗證';
+  var statusCls=(r.hard_block||status.indexOf('處置')>=0||status.indexOf('停止')>=0)?'neg':(status.indexOf('注意')>=0?'neutral':'pos');
+  var html='<table>';
+  html+='<tr><th>交易制度版本</th><td>'+escapeHtml(r.rule_version||'--')+'</td></tr>';
+  html+='<tr><th>目前市場時段</th><td>'+escapeHtml(ses.session||'--')+'</td></tr>';
+  html+='<tr><th>股票交易狀態</th><td class="'+statusCls+'"><b>'+escapeHtml(status)+'</b></td></tr>';
+  html+='<tr><th>制度校驗可信度</th><td class="mono">'+fmt(r.compliance_confidence,0)+'/100</td></tr>';
+  html+='<tr><th>目前升降單位</th><td class="mono">'+fmt(r.tick_size_at_close,2)+'</td></tr>';
+  html+='<tr><th>一般漲跌停估算</th><td class="mono">'+fmt(lim.limit_down)+' ～ '+fmt(lim.limit_up)+'</td></tr>';
+  html+='</table>';
+  if(r.restrictions&&r.restrictions.length) html+='<div class="battle-note battle-risk"><b>制度限制：</b>'+r.restrictions.map(escapeHtml).join('；')+'</div>';
+  if(r.notes&&r.notes.length) html+='<div class="battle-note"><b>制度提醒：</b>'+r.notes.map(escapeHtml).join('；')+'</div>';
+  if(p){
+    html+='<div class="battle-note"><b>政策環境：</b>'+escapeHtml(p.label||'--')+'。'+escapeHtml(p.principle||'')+'</div>';
+    html+='<div style="font-size:.72rem;color:var(--text-dim);margin-top:6px">政策事件只有在可驗證資料存在時才調整模型；沒有官方資料時維持中性，不以「政府支持」直接推論股價必漲。</div>';
+  }
+  el.innerHTML=html;
 }
 
 function renderThreeCore(){
@@ -1385,6 +1461,47 @@ function runBacktest() {
       resEl.innerHTML = errHtml(err.message || '回測請求失敗');
     });
 }
+
+
+// ===========================================================================
+// V2.9.0 AI 自主分析小助手（前台只顯示必要說明；完整運算留在後台）
+// ===========================================================================
+function loadAiHelper(){
+  var st=document.getElementById('aiHelperStatus');
+  var rp=document.getElementById('aiHelperReport');
+  if(!st||!rp)return;
+  Promise.all([
+    fetch('/api/assistant/status').then(function(r){return r.json()}),
+    fetch('/api/assistant/report').then(function(r){return r.json()})
+  ]).then(function(xs){
+    var a=xs[0]||{}, r=((xs[1]||{}).data)||{};
+    var l=a.learning||{}, cr=a.capability_review||{}, op=a.opportunity_module||{};
+    st.innerHTML='<div class="decision-split">'+
+      '<div><div class="k">目前權限</div><div class="v">'+(a.permission_level||'L0')+'</div></div>'+
+      '<div><div class="k">學習日報</div><div class="v">'+(l.trading_reports||0)+' 日</div></div>'+
+      '<div><div class="k">已驗證樣本</div><div class="v">'+(l.validated_samples||0)+'</div></div></div>'+
+      '<div class="battle-note">每日晨報：'+(a.schedule||'台灣交易日 06:30')+'。'+
+      (cr.eligible_for_review?'已達第一次權限審查門檻，仍需人工同意才可升級。':'目前持續在學習觀察期。')+'<br>'+ 
+      (op.message||'')+'</div>';
+    var s=r.summary||{};
+    var strong=(s.strong_industries||[]).join('、')||'資料整理中';
+    var weak=(s.weak_industries||[]).join('、')||'資料整理中';
+    rp.innerHTML='<div class="battle-action">'+(s.taiwan_market||'資料整理中')+'</div>'+
+      '<div class="battle-grid">'+
+      '<div class="battle-kpi"><div class="k">強勢產業</div><div class="v">'+strong+'</div></div>'+
+      '<div class="battle-kpi"><div class="k">弱勢產業</div><div class="v">'+weak+'</div></div>'+
+      '<div class="battle-kpi"><div class="k">美股影響</div><div class="v">'+(s.us_impact||'—')+'</div></div>'+
+      '<div class="battle-kpi"><div class="k">海外資料</div><div class="v">'+(s.overseas_data||'—')+'</div></div>'+
+      '<div class="battle-kpi"><div class="k">政策／地緣風險</div><div class="v">'+(s.geo_policy_risk||'—')+'</div></div>'+
+      '<div class="battle-kpi"><div class="k">信心度</div><div class="v">'+(s.confidence!=null?s.confidence+'%':'—')+'</div></div></div>'+
+      '<div class="battle-note battle-risk">'+(s.main_risk||'目前無重大新增風險')+'</div>'+
+      '<div class="battle-note">'+(s.assistant_note||'')+'</div>';
+  }).catch(function(e){
+    st.innerHTML=errHtml('AI 小助手狀態讀取失敗：'+e.message);
+    rp.innerHTML=errHtml('晨報讀取失敗');
+  });
+}
+setTimeout(loadAiHelper, 200);
 
 document.getElementById('stockInput').focus();
 document.getElementById('entryDateInput').addEventListener('change', function(){
