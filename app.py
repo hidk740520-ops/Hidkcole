@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import math
 import json
+import gc
 import hashlib
 import threading
 from pathlib import Path
@@ -38,8 +39,8 @@ FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 # ===========================================================================
 # V2.8.2 持股輸入體驗整合版標記
 # ===========================================================================
-SYSTEM_VERSION = "2.9.0"
-MODEL_VERSION = "V2.9.0-ai-autonomous-learning-governance"
+SYSTEM_VERSION = "2.9.1"
+MODEL_VERSION = "V2.9.1-ai-autonomous-learning-lowmem"
 RELEASE_STAGE = "AI自主分析小助手正式整合版"
 
 
@@ -3689,7 +3690,7 @@ def ai_is_trading_day(day=None):
 
 
 def _ai_latest_market_snapshot():
-    env, err = fetch_market_environment(lookback_days=800)
+    env, err = fetch_market_environment(lookback_days=120)
     if err or not env:
         return {"available": False, "error": err or "大盤資料不足"}
     d = sorted(env.keys())[-1]
@@ -3702,18 +3703,20 @@ def _ai_latest_market_snapshot():
 
 
 def _ai_yahoo_history(symbol, days=7):
-    try:
-        import yfinance as yf  # type: ignore
-        h = yf.Ticker(symbol).history(period=f"{max(5, days)}d", auto_adjust=False)
-        closes = [float(v) for v in h.get("Close", []).tolist() if pd.notna(v)]
-        if len(closes) >= 2:
-            return closes[-1], closes[-2], None
-    except Exception:
-        pass
+    """AI 晨報專用輕量行情抓取。
+
+    Render Free 記憶體有限，這裡刻意不載入 yfinance/Ticker 物件，
+    直接使用 Yahoo chart JSON，避免晨報一次分析多個海外商品時造成 OOM。
+    """
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-        r = requests.get(url, params={"interval": "1d", "range": "10d"},
-                         headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        r = requests.get(
+            url,
+            params={"interval": "1d", "range": "10d"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        r.raise_for_status()
         j = r.json(); rr = (j.get("chart", {}).get("result") or [None])[0]
         closes = (((rr or {}).get("indicators") or {}).get("quote") or [{}])[0].get("close", [])
         closes = [float(v) for v in closes if v is not None]
@@ -4030,9 +4033,13 @@ def ai_build_daily_report(report_day=None, persist=True):
     level = _ai_meta_get("permission_level", "L0")
     market = _ai_latest_market_snapshot()
     settled = _ai_settle_previous_predictions(market)
+    gc.collect()
     us = ai_fetch_us_context()
+    gc.collect()
     geo = ai_fetch_geo_policy_watch()
+    gc.collect()
     sector = ai_build_sector_snapshot()
+    gc.collect()
     pred = _ai_market_prediction(market, us, geo)
     stats = _ai_learning_stats()
     review = ai_capability_review()
@@ -4219,7 +4226,18 @@ def api_assistant_run_daily():
     elif request.remote_addr not in ("127.0.0.1", "::1"):
         return jsonify({"status": 403, "msg": "雲端使用前請先設定 AI_SCHEDULER_TOKEN"}), 403
     result = ai_run_daily(force=bool(request.args.get("force") == "1"), send_email=True)
-    return jsonify({"status": 200, **result})
+    # 排程端點只回傳必要資訊，避免把整份大型 report JSON 再序列化一次，
+    # 降低 Render Free 記憶體尖峰。完整報告可由 /api/assistant/report 讀取。
+    report = result.pop("report", None) if isinstance(result, dict) else None
+    compact = {"status": 200, **result}
+    if isinstance(report, dict):
+        compact["report_summary"] = {
+            "report_date": report.get("report_date"),
+            "permission_level": report.get("permission_level"),
+            "summary": report.get("summary"),
+        }
+    gc.collect()
+    return jsonify(compact)
 
 
 def _ai_internal_scheduler_loop():
