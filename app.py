@@ -4875,6 +4875,72 @@ def api_assistant_report():
     return jsonify({"status": 200, "data": latest, "report_ready": True})
 
 
+
+@app.route("/api/assistant/import_report", methods=["POST"])
+def api_assistant_import_report():
+    """接收 GitHub Actions 已完成的晨報；只做驗證與保存，不執行重型運算。"""
+    supplied = request.headers.get("X-Assistant-Token", "") or request.args.get("token", "")
+    if not AI_SCHEDULER_TOKEN or supplied != AI_SCHEDULER_TOKEN:
+        return jsonify({"status": 403, "msg": "排程驗證失敗"}), 403
+
+    report = request.get_json(silent=True)
+    if not isinstance(report, dict):
+        return jsonify({"status": 400, "msg": "晨報格式錯誤"}), 400
+
+    report_date = str(report.get("report_date") or "").strip()
+    generated_at = str(report.get("generated_at") or "").strip()
+    if not report_date or not generated_at:
+        return jsonify({"status": 400, "msg": "晨報缺少日期或產生時間"}), 400
+
+    summary = report.get("summary") or {}
+    pages = report.get("pages") or {}
+    market = ((pages.get("market") or {}).get("market") or {})
+    prediction = ((pages.get("market") or {}).get("prediction") or {})
+
+    _ai_init_db()
+    with _AI_DB_LOCK:
+        conn = _ai_db()
+        try:
+            conn.execute(
+                "INSERT INTO assistant_daily_reports("
+                "report_date,generated_at,market_data_date,market_close,"
+                "prediction_direction,prediction_confidence,permission_level,"
+                "report_json,emailed_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(report_date) DO UPDATE SET "
+                "generated_at=excluded.generated_at,"
+                "market_data_date=excluded.market_data_date,"
+                "market_close=excluded.market_close,"
+                "prediction_direction=excluded.prediction_direction,"
+                "prediction_confidence=excluded.prediction_confidence,"
+                "permission_level=excluded.permission_level,"
+                "report_json=excluded.report_json,"
+                "emailed_at=excluded.emailed_at",
+                (
+                    report_date,
+                    generated_at,
+                    market.get("date"),
+                    market.get("close"),
+                    prediction.get("direction"),
+                    prediction.get("confidence"),
+                    report.get("permission_level") or "L0",
+                    json.dumps(report, ensure_ascii=False),
+                    datetime.now(ZoneInfo("Asia/Taipei")).isoformat(timespec="seconds"),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    return jsonify({
+        "status": 200,
+        "saved": True,
+        "report_date": report_date,
+        "taiwan_market": summary.get("taiwan_market"),
+        "msg": "晨報已同步到網站",
+    })
+
+
 @app.route("/api/assistant/review")
 def api_assistant_review():
     return jsonify({"status": 200, "data": ai_capability_review()})
