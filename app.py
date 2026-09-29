@@ -4812,10 +4812,20 @@ def api_assistant_status():
 
 @app.route("/api/assistant/report")
 def api_assistant_report():
+    """輕量唯讀端點：只讀已存在晨報，不在網頁請求中臨時計算完整晨報。
+
+    Render Free 記憶體有限；若尚無晨報，前端顯示「尚未產生」，
+    完整晨報只能由獨立排程流程建立。
+    """
     latest = ai_get_latest_report()
     if latest is None:
-        latest = ai_build_daily_report(persist=False)
-    return jsonify({"status": 200, "data": latest})
+        return jsonify({
+            "status": 200,
+            "data": None,
+            "report_ready": False,
+            "msg": "尚未產生晨報"
+        })
+    return jsonify({"status": 200, "data": latest, "report_ready": True})
 
 
 @app.route("/api/assistant/review")
