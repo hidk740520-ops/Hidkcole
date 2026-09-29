@@ -3,7 +3,7 @@
 台股個股健診升級版 — Flask 後端
 ================================
 安裝說明：
-    pip install flask requests yfinance pandas
+    pip install flask requests pandas
 
 啟動方式：
     python app.py
@@ -25,7 +25,21 @@ import time
 import os
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
-import pandas as pd
+import importlib
+
+class _LazyModule:
+    """需要時才載入大型套件，降低 Gunicorn 啟動常駐記憶體。"""
+    def __init__(self, module_name):
+        self._module_name = module_name
+        self._module = None
+    def _load(self):
+        if self._module is None:
+            self._module = importlib.import_module(self._module_name)
+        return self._module
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+pd = _LazyModule("pandas")
 import math
 import json
 import gc
@@ -34,14 +48,17 @@ import threading
 from pathlib import Path
 
 app = Flask(__name__)
+# V2.9.2 資源治理：避免 JSON 回應輸出非必要空白，降低序列化與傳輸負擔。
+app.config["JSON_AS_ASCII"] = False
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_CONTENT_LENGTH", str(2 * 1024 * 1024)))
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
 # ===========================================================================
 # V2.8.2 持股輸入體驗整合版標記
 # ===========================================================================
-SYSTEM_VERSION = "2.9.1"
-MODEL_VERSION = "V2.9.1-ai-autonomous-learning-lowmem"
-RELEASE_STAGE = "AI自主分析小助手正式整合版"
+SYSTEM_VERSION = "2.9.2"
+MODEL_VERSION = "V2.9.2-startup-slim"
+RELEASE_STAGE = "啟動瘦身與資源治理版"
 
 
 # 若在 Render 的 Environment Variables 裡設定 FINMIND_TOKEN，
@@ -1881,105 +1898,104 @@ def _growth(cur, prev):
     return (cur - prev) / abs(prev) * 100
 
 
+def _yahoo_raw_value(obj, key, default=None):
+    """Yahoo quoteSummary 欄位可能是 raw/fmt 物件，統一取 raw。"""
+    try:
+        v = (obj or {}).get(key, default)
+        if isinstance(v, dict):
+            return v.get("raw", default)
+        return v
+    except Exception:
+        return default
+
+
 def fetch_company_fundamentals(stock_id, meta=None):
-    """以 yfinance 低頻取得公司資料與三大報表；失敗時整體模型自動降級。"""
+    """
+    V2.9.2 輕量公司資料來源：直接使用 Yahoo 公開 JSON，不載入 yfinance。
+    目的：保留主要基本面／估值欄位，同時減少部署套件與執行記憶體。
+    三表細項若來源未提供，交由 coverage/limitations 降級，不硬補資料。
+    """
     now = time.time()
     cached = _YF_FUND_CACHE.get(stock_id)
     if cached and now - cached[0] < _YF_FUND_TTL:
         return cached[1]
-    result = {"available": False, "source": "Yahoo Finance/yfinance", "limitations": []}
-    try:
-        import yfinance as yf  # type: ignore
-        market = str((meta or {}).get("market") or "")
-        suffixes = [".TWO", ".TW"] if ("上櫃" in market or "OTC" in market.upper()) else [".TW", ".TWO"]
-        tk = None; info = {}
-        for suffix in suffixes:
-            try:
-                cand = yf.Ticker(str(stock_id) + suffix)
-                inf = cand.info or {}
-                if inf and (inf.get("regularMarketPrice") is not None or inf.get("marketCap") is not None or inf.get("longName")):
-                    tk, info = cand, inf
-                    break
-            except Exception:
+
+    result = {"available": False, "source": "Yahoo Finance JSON", "limitations": []}
+    market = str((meta or {}).get("market") or "")
+    suffixes = [".TWO", ".TW"] if ("上櫃" in market or "OTC" in market.upper()) else [".TW", ".TWO"]
+    modules = "assetProfile,financialData,defaultKeyStatistics,summaryDetail,price"
+
+    for suffix in suffixes:
+        symbol = str(stock_id) + suffix
+        try:
+            url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+            r = requests.get(url, params={"modules": modules}, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.status_code != 200:
                 continue
-        if tk is None:
-            raise RuntimeError("Yahoo Finance 查無公司資料")
-        try: fin = tk.financials
-        except Exception: fin = pd.DataFrame()
-        try: bal = tk.balance_sheet
-        except Exception: bal = pd.DataFrame()
-        try: cf = tk.cashflow
-        except Exception: cf = pd.DataFrame()
+            j = r.json()
+            qr = (j.get("quoteSummary") or {}).get("result") or []
+            if not qr:
+                continue
+            x = qr[0] or {}
+            profile = x.get("assetProfile") or {}
+            fin = x.get("financialData") or {}
+            stat = x.get("defaultKeyStatistics") or {}
+            detail = x.get("summaryDetail") or {}
+            price = x.get("price") or {}
 
-        rev0 = _statement_value(fin, ["Total Revenue"], 0)
-        rev1 = _statement_value(fin, ["Total Revenue"], 1)
-        ni0 = _statement_value(fin, ["Net Income", "Net Income Common Stockholders"], 0)
-        ni1 = _statement_value(fin, ["Net Income", "Net Income Common Stockholders"], 1)
-        gp0 = _statement_value(fin, ["Gross Profit"], 0)
-        op0 = _statement_value(fin, ["Operating Income"], 0)
-        assets0 = _statement_value(bal, ["Total Assets"], 0)
-        debt0 = _statement_value(bal, ["Total Debt", "Total Liabilities Net Minority Interest"], 0)
-        ca0 = _statement_value(bal, ["Current Assets", "Total Current Assets"], 0)
-        cl0 = _statement_value(bal, ["Current Liabilities", "Total Current Liabilities"], 0)
-        ar0 = _statement_value(bal, ["Accounts Receivable", "Receivables"], 0)
-        ar1 = _statement_value(bal, ["Accounts Receivable", "Receivables"], 1)
-        inv0 = _statement_value(bal, ["Inventory"], 0)
-        inv1 = _statement_value(bal, ["Inventory"], 1)
-        ocf0 = _statement_value(cf, ["Operating Cash Flow", "Total Cash From Operating Activities"], 0)
-        capex0 = _statement_value(cf, ["Capital Expenditure", "Capital Expenditures"], 0)
-        fcf0 = _statement_value(cf, ["Free Cash Flow"], 0)
-        if fcf0 is None and ocf0 is not None and capex0 is not None:
-            fcf0 = ocf0 + capex0  # yfinance capex 常為負數
+            revenue_growth = _pct100(_yahoo_raw_value(fin, "revenueGrowth"))
+            earnings_growth = _pct100(_yahoo_raw_value(fin, "earningsGrowth"))
+            gross_margin = _pct100(_yahoo_raw_value(fin, "grossMargins"))
+            operating_margin = _pct100(_yahoo_raw_value(fin, "operatingMargins"))
+            profit_margin = _pct100(_yahoo_raw_value(fin, "profitMargins"))
+            roe = _pct100(_yahoo_raw_value(fin, "returnOnEquity"))
+            current_ratio = _num(_yahoo_raw_value(fin, "currentRatio"))
+            debt_to_equity = _num(_yahoo_raw_value(fin, "debtToEquity"))
+            # Yahoo debtToEquity 常以百分比表示，近似轉成資產負債率代理；不冒充正式財報值。
+            debt_ratio = None
+            if debt_to_equity is not None and debt_to_equity >= 0:
+                de = debt_to_equity / 100.0 if debt_to_equity > 3 else debt_to_equity
+                debt_ratio = de / (1.0 + de) * 100 if de >= 0 else None
 
-        revenue_growth = _pct100(info.get("revenueGrowth"))
-        if revenue_growth is None: revenue_growth = _growth(rev0, rev1)
-        earnings_growth = _pct100(info.get("earningsGrowth"))
-        if earnings_growth is None: earnings_growth = _growth(ni0, ni1)
-        gross_margin = _pct100(info.get("grossMargins"))
-        if gross_margin is None and rev0: gross_margin = gp0 / rev0 * 100 if gp0 is not None else None
-        operating_margin = _pct100(info.get("operatingMargins"))
-        if operating_margin is None and rev0: operating_margin = op0 / rev0 * 100 if op0 is not None else None
-        profit_margin = _pct100(info.get("profitMargins"))
-        if profit_margin is None and rev0: profit_margin = ni0 / rev0 * 100 if ni0 is not None else None
-        roe = _pct100(info.get("returnOnEquity"))
-        current_ratio = _num(info.get("currentRatio"))
-        if current_ratio is None and cl0: current_ratio = ca0 / cl0 if ca0 is not None else None
-        debt_ratio = debt0 / assets0 * 100 if debt0 is not None and assets0 else None
-        cfo_ni = ocf0 / ni0 if ocf0 is not None and ni0 not in (None, 0) else None
-        fcf_margin = fcf0 / rev0 * 100 if fcf0 is not None and rev0 else None
-        ar_growth = _growth(ar0, ar1)
-        inv_growth = _growth(inv0, inv1)
+            fcf = _num(_yahoo_raw_value(fin, "freeCashflow"))
+            ocf = _num(_yahoo_raw_value(fin, "operatingCashflow"))
+            total_revenue = _num(_yahoo_raw_value(fin, "totalRevenue"))
+            fcf_margin = (fcf / total_revenue * 100) if fcf is not None and total_revenue else None
 
-        result.update({
-            "available": True,
-            "ticker": getattr(tk, "ticker", None),
-            "name": info.get("longName") or info.get("shortName"),
-            "sector": info.get("sector"), "industry": info.get("industry"),
-            "business_summary": (info.get("longBusinessSummary") or "")[:1200],
-            "market_cap": _num(info.get("marketCap")),
-            "revenue_growth": revenue_growth, "earnings_growth": earnings_growth,
-            "gross_margin": gross_margin, "operating_margin": operating_margin,
-            "profit_margin": profit_margin, "roe": roe,
-            "free_cash_flow": _num(info.get("freeCashflow"), fcf0),
-            "operating_cash_flow": _num(info.get("operatingCashflow"), ocf0),
-            "cfo_to_net_income": cfo_ni, "fcf_margin": fcf_margin,
-            "debt_ratio": debt_ratio, "current_ratio": current_ratio,
-            "receivable_growth": ar_growth, "inventory_growth": inv_growth,
-            "trailing_pe": _num(info.get("trailingPE")), "forward_pe": _num(info.get("forwardPE")),
-            "price_to_book": _num(info.get("priceToBook")),
-            "dividend_yield": _pct100(info.get("dividendYield")),
-            "peg_ratio": _num(info.get("pegRatio")),
-            "target_mean_price": _num(info.get("targetMeanPrice")),
-            "analyst_count": int(_num(info.get("numberOfAnalystOpinions"), 0) or 0),
-            "recommendation_mean": _num(info.get("recommendationMean")),
-        })
-        if not result.get("business_summary"):
-            result["limitations"].append("公司商業模式文字資料不足")
-    except Exception as e:
-        result["limitations"].append(str(e)[:120])
+            result.update({
+                "available": True,
+                "ticker": symbol,
+                "name": _yahoo_raw_value(price, "longName") or _yahoo_raw_value(price, "shortName") or (meta or {}).get("name"),
+                "sector": profile.get("sector"), "industry": profile.get("industry"),
+                "business_summary": (profile.get("longBusinessSummary") or "")[:1200],
+                "market_cap": _num(_yahoo_raw_value(price, "marketCap")),
+                "revenue_growth": revenue_growth, "earnings_growth": earnings_growth,
+                "gross_margin": gross_margin, "operating_margin": operating_margin,
+                "profit_margin": profit_margin, "roe": roe,
+                "free_cash_flow": fcf, "operating_cash_flow": ocf,
+                "cfo_to_net_income": None, "fcf_margin": fcf_margin,
+                "debt_ratio": debt_ratio, "current_ratio": current_ratio,
+                "receivable_growth": None, "inventory_growth": None,
+                "trailing_pe": _num(_yahoo_raw_value(detail, "trailingPE")),
+                "forward_pe": _num(_yahoo_raw_value(detail, "forwardPE")),
+                "price_to_book": _num(_yahoo_raw_value(stat, "priceToBook")),
+                "dividend_yield": _pct100(_yahoo_raw_value(detail, "dividendYield")),
+                "peg_ratio": _num(_yahoo_raw_value(stat, "pegRatio")),
+                "target_mean_price": _num(_yahoo_raw_value(fin, "targetMeanPrice")),
+                "analyst_count": int(_num(_yahoo_raw_value(fin, "numberOfAnalystOpinions"), 0) or 0),
+                "recommendation_mean": _num(_yahoo_raw_value(fin, "recommendationMean")),
+            })
+            result["limitations"].append("輕量模式不常駐下載完整三表；應收／存貨與現金流品質細項缺值時由 coverage 自動降級")
+            if not result.get("business_summary"):
+                result["limitations"].append("公司商業模式文字資料不足")
+            break
+        except Exception as e:
+            result["limitations"].append(str(e)[:120])
+
+    if not result.get("available"):
+        result["limitations"].append("Yahoo 輕量公司資料暫不可用")
     _YF_FUND_CACHE[stock_id] = (now, result)
     return result
-
 
 def build_financial_quality_model(raw, revenue_yoy=None):
     """11 核心財務健康指標；缺值不硬補分，使用 coverage 告知可信度。"""
@@ -3214,37 +3230,7 @@ def get_us_market():
     }
     results = []
 
-    # --- 優先使用 yfinance ---
-    try:
-        import yfinance as yf  # type: ignore
-
-        for sym, name in symbols.items():
-            try:
-                tk = yf.Ticker(sym)
-                hist = tk.history(period="5d")
-                if hist is not None and len(hist) >= 2:
-                    close = float(hist["Close"].iloc[-1])
-                    prev_close = float(hist["Close"].iloc[-2])
-                    chg = close - prev_close
-                    chg_pct = (chg / prev_close) * 100 if prev_close else 0
-                    results.append(
-                        {
-                            "symbol": sym,
-                            "name": name,
-                            "close": round(close, 2),
-                            "change": round(chg, 2),
-                            "change_pct": round(chg_pct, 2),
-                        }
-                    )
-            except Exception:
-                pass  # 個別 symbol 失敗不中斷
-
-        if len(results) == len(symbols):
-            return jsonify({"status": 200, "data": results})
-    except ImportError:
-        pass  # yfinance 未安裝，改用 Yahoo JSON API
-
-    # --- fallback: Yahoo Finance JSON API ---
+    # V2.9.2：直接使用 Yahoo JSON API，避免載入 yfinance。
     for sym, name in symbols.items():
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d"
@@ -4262,7 +4248,7 @@ def _ai_maybe_start_scheduler():
         t = threading.Thread(target=_ai_internal_scheduler_loop, name="ai-assistant-scheduler", daemon=True)
         t.start()
 
-_ai_init_db()
+# V2.9.2：資料庫採首次使用時初始化，避免 Gunicorn import 階段做磁碟 I/O。
 _ai_maybe_start_scheduler()
 
 
