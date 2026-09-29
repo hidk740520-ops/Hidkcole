@@ -4115,6 +4115,7 @@ import sqlite3
 from zoneinfo import ZoneInfo
 
 AI_DB_PATH = Path(os.environ.get("AI_ASSISTANT_DB", "ai_assistant.sqlite3"))
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 AI_REPORT_HOUR = int(os.environ.get("AI_REPORT_HOUR", "6"))
 AI_REPORT_MINUTE = int(os.environ.get("AI_REPORT_MINUTE", "30"))
 AI_MIN_REVIEW_CALENDAR_DAYS = int(os.environ.get("AI_MIN_REVIEW_CALENDAR_DAYS", "180"))
@@ -4134,7 +4135,52 @@ _AI_NEWS_CACHE = {"data": None, "ts": 0.0}
 _AI_NEWS_TTL = 1800
 
 
+def _ai_using_postgres():
+    return DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://")
+
+
+class _PostgresCompatConnection:
+    """讓既有 SQLite 風格 conn.execute() 可直接共用 PostgreSQL。"""
+    def __init__(self, raw_conn, cursor_factory):
+        self._conn = raw_conn
+        self._cursor_factory = cursor_factory
+
+    @staticmethod
+    def _sql(sql):
+        # 本專案查詢沒有把 ? 放在 SQL 字串常值中，可安全轉成 psycopg2 placeholder。
+        return sql.replace("?", "%s")
+
+    def execute(self, sql, params=()):
+        cur = self._conn.cursor(cursor_factory=self._cursor_factory)
+        cur.execute(self._sql(sql), params or ())
+        return cur
+
+    def executescript(self, script):
+        cur = self._conn.cursor()
+        for stmt in script.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                cur.execute(stmt)
+        cur.close()
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+
 def _ai_db():
+    """正式環境優先 PostgreSQL；未設定 DATABASE_URL 時退回本機 SQLite。"""
+    if _ai_using_postgres():
+        import psycopg2
+        from psycopg2.extras import DictCursor
+        raw = psycopg2.connect(DATABASE_URL, connect_timeout=12)
+        return _PostgresCompatConnection(raw, DictCursor)
+
     conn = sqlite3.connect(str(AI_DB_PATH), timeout=20)
     conn.row_factory = sqlite3.Row
     return conn
@@ -4144,64 +4190,134 @@ def _ai_init_db():
     with _AI_DB_LOCK:
         conn = _ai_db()
         try:
-            conn.executescript("""
-            CREATE TABLE IF NOT EXISTS assistant_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS assistant_daily_reports (
-                report_date TEXT PRIMARY KEY,
-                generated_at TEXT NOT NULL,
-                market_data_date TEXT,
-                market_close REAL,
-                prediction_direction TEXT,
-                prediction_confidence REAL,
-                permission_level TEXT NOT NULL,
-                report_json TEXT NOT NULL,
-                emailed_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS assistant_predictions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                signal_date TEXT NOT NULL,
-                target_date TEXT NOT NULL,
-                scope TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                confidence REAL,
-                factors_json TEXT,
-                base_close REAL,
-                outcome_date TEXT,
-                outcome_close REAL,
-                outcome_return REAL,
-                correct INTEGER,
-                settled_at TEXT,
-                UNIQUE(signal_date, target_date, scope, subject)
-            );
-            CREATE TABLE IF NOT EXISTS assistant_candidate_models (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                version TEXT UNIQUE NOT NULL,
-                created_at TEXT NOT NULL,
-                status TEXT NOT NULL,
-                parameters_json TEXT NOT NULL,
-                metrics_json TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS assistant_permission_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                from_level TEXT NOT NULL,
-                requested_level TEXT NOT NULL,
-                status TEXT NOT NULL,
-                evidence_json TEXT NOT NULL,
-                note TEXT
-            );
-            """)
+            if _ai_using_postgres():
+                conn.executescript("""
+                CREATE TABLE IF NOT EXISTS assistant_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS assistant_daily_reports (
+                    report_date TEXT PRIMARY KEY,
+                    generated_at TEXT NOT NULL,
+                    market_data_date TEXT,
+                    market_close DOUBLE PRECISION,
+                    prediction_direction TEXT,
+                    prediction_confidence DOUBLE PRECISION,
+                    permission_level TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    emailed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS assistant_predictions (
+                    id BIGSERIAL PRIMARY KEY,
+                    signal_date TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    confidence DOUBLE PRECISION,
+                    factors_json TEXT,
+                    base_close DOUBLE PRECISION,
+                    outcome_date TEXT,
+                    outcome_close DOUBLE PRECISION,
+                    outcome_return DOUBLE PRECISION,
+                    correct INTEGER,
+                    settled_at TEXT,
+                    UNIQUE(signal_date, target_date, scope, subject)
+                );
+                CREATE TABLE IF NOT EXISTS assistant_candidate_models (
+                    id BIGSERIAL PRIMARY KEY,
+                    version TEXT UNIQUE NOT NULL,
+                    created_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    metrics_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS assistant_permission_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    from_level TEXT NOT NULL,
+                    requested_level TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    note TEXT
+                );
+                CREATE TABLE IF NOT EXISTS assistant_run_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    run_at TEXT NOT NULL,
+                    run_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    report_date TEXT,
+                    detail TEXT
+                );
+                """)
+            else:
+                conn.executescript("""
+                CREATE TABLE IF NOT EXISTS assistant_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS assistant_daily_reports (
+                    report_date TEXT PRIMARY KEY,
+                    generated_at TEXT NOT NULL,
+                    market_data_date TEXT,
+                    market_close REAL,
+                    prediction_direction TEXT,
+                    prediction_confidence REAL,
+                    permission_level TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    emailed_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS assistant_predictions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_date TEXT NOT NULL,
+                    target_date TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    confidence REAL,
+                    factors_json TEXT,
+                    base_close REAL,
+                    outcome_date TEXT,
+                    outcome_close REAL,
+                    outcome_return REAL,
+                    correct INTEGER,
+                    settled_at TEXT,
+                    UNIQUE(signal_date, target_date, scope, subject)
+                );
+                CREATE TABLE IF NOT EXISTS assistant_candidate_models (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version TEXT UNIQUE NOT NULL,
+                    created_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    parameters_json TEXT NOT NULL,
+                    metrics_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS assistant_permission_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    from_level TEXT NOT NULL,
+                    requested_level TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    note TEXT
+                );
+                CREATE TABLE IF NOT EXISTS assistant_run_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_at TEXT NOT NULL,
+                    run_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    report_date TEXT,
+                    detail TEXT
+                );
+                """)
             conn.commit()
         finally:
             conn.close()
     _ai_meta_setdefault("start_date", datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat())
     _ai_meta_setdefault("permission_level", "L0")
-    _ai_meta_setdefault("schema_version", "1")
+    _ai_meta_setdefault("schema_version", "2")
 
 
 def _ai_meta_get(key, default=None):
@@ -4232,6 +4348,26 @@ def _ai_meta_setdefault(key, value):
     if _ai_meta_get(key) is None:
         _ai_meta_set(key, value)
 
+
+def ai_log_run(run_type, status, report_date=None, detail=None):
+    """持久保存晨報／同步流程執行紀錄。失敗時不反向拖垮主流程。"""
+    try:
+        _ai_init_db()
+        conn = _ai_db()
+        try:
+            conn.execute(
+                "INSERT INTO assistant_run_log(run_at,run_type,status,report_date,detail) VALUES(?,?,?,?,?)",
+                (
+                    datetime.now(ZoneInfo("Asia/Taipei")).isoformat(timespec="seconds"),
+                    str(run_type), str(status), report_date,
+                    (str(detail)[:2000] if detail is not None else None),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print("[AI run log]", e)
 
 def _ai_fetch_twse_holidays(year):
     """從 TWSE 公開休市日程取得日期；失敗時只退回週末判斷，不假裝已驗證。"""
@@ -4603,7 +4739,7 @@ def _ai_create_candidate_model(stats):
     conn = _ai_db()
     try:
         conn.execute(
-            "INSERT OR IGNORE INTO assistant_candidate_models(version,created_at,status,parameters_json,metrics_json) VALUES(?,?,?,?,?)",
+            "INSERT INTO assistant_candidate_models(version,created_at,status,parameters_json,metrics_json) VALUES(?,?,?,?,?) ON CONFLICT(version) DO NOTHING",
             (version, datetime.now(ZoneInfo("Asia/Taipei")).isoformat(timespec="seconds"), "CANDIDATE_ONLY",
              json.dumps(params, ensure_ascii=False), json.dumps(metrics, ensure_ascii=False)),
         )
@@ -4701,7 +4837,7 @@ def ai_build_daily_report(report_day=None, persist=True):
                 )
                 if market_close:
                     conn.execute(
-                        "INSERT OR IGNORE INTO assistant_predictions(signal_date,target_date,scope,subject,direction,confidence,factors_json,base_close) VALUES(?,?,?,?,?,?,?,?)",
+                        "INSERT INTO assistant_predictions(signal_date,target_date,scope,subject,direction,confidence,factors_json,base_close) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(signal_date,target_date,scope,subject) DO NOTHING",
                         (report_date, report_date, "MARKET", "TAIEX", pred["direction"], pred["confidence"],
                          json.dumps({"market": market, "us": {"impact": us.get("impact"), "score": us.get("score")}, "geo": {"risk_score": geo.get("risk_score")}}, ensure_ascii=False),
                          market_close),
@@ -4853,6 +4989,8 @@ def api_assistant_status():
                     "schedule": f"台灣交易日 {AI_REPORT_HOUR:02d}:{AI_REPORT_MINUTE:02d}",
                     "email_configured": bool(REPORT_EMAIL and RESEND_API_KEY),
                     "email_provider": "resend" if RESEND_API_KEY else "未設定",
+                    "storage_backend": "postgresql" if _ai_using_postgres() else "sqlite_fallback",
+                    "persistent_storage": bool(_ai_using_postgres()),
                     "learning": _ai_learning_stats(), "capability_review": ai_capability_review(),
                     "opportunity_module": _ai_opportunity_module(_ai_meta_get("permission_level", "L0"))})
 
@@ -4931,6 +5069,8 @@ def api_assistant_import_report():
             conn.commit()
         finally:
             conn.close()
+
+    ai_log_run("report_import", "success", report_date, "GitHub Actions 晨報同步完成")
 
     return jsonify({
         "status": 200,
