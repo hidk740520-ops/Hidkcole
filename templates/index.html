@@ -1384,15 +1384,26 @@ function runBacktest() {
 // ===========================================================================
 // V2.9.7 AI 自主分析小助手（前台只顯示必要說明；完整運算留在後台）
 // ===========================================================================
+function apiJson(path){
+  // 使用目前網站 origin 組成完整網址，並先檢查 HTTP/JSON，避免 Safari 將底層 URL/解析錯誤直接丟到畫面。
+  var base=(window.location && window.location.origin) ? window.location.origin : '';
+  var url=base + path;
+  return fetch(url, {method:'GET', cache:'no-store', headers:{'Accept':'application/json'}}).then(function(r){
+    if(!r.ok){ throw new Error('HTTP '+r.status); }
+    var ct=(r.headers.get('content-type')||'').toLowerCase();
+    if(ct.indexOf('application/json')===-1){ throw new Error('伺服器回傳格式異常'); }
+    return r.json();
+  });
+}
+
 function loadAiHelper(){
   var st=document.getElementById('aiHelperStatus');
   var rp=document.getElementById('aiHelperReport');
   if(!st||!rp)return;
-  Promise.all([
-    fetch('/api/assistant/status').then(function(r){return r.json()}),
-    fetch('/api/assistant/report').then(function(r){return r.json()})
-  ]).then(function(xs){
-    var a=xs[0]||{}, r=((xs[1]||{}).data)||{};
+
+  // 狀態與晨報分開讀取：其中一個失敗，不拖垮另一個區塊。
+  apiJson('/api/assistant/status').then(function(a){
+    a=a||{};
     var l=a.learning||{}, cr=a.capability_review||{}, op=a.opportunity_module||{};
     st.innerHTML='<div class="decision-split">'+
       '<div><div class="k">目前權限</div><div class="v">'+(a.permission_level||'L0')+'</div></div>'+
@@ -1401,7 +1412,16 @@ function loadAiHelper(){
       '<div class="battle-note">每日晨報：'+(a.schedule||'台灣交易日 06:30')+'。'+
       (cr.eligible_for_review?'已達第一次權限審查門檻，仍需人工同意才可升級。':'目前持續在學習觀察期。')+'<br>'+ 
       (op.message||'')+'</div>';
-    var s=r.summary||{};
+  }).catch(function(e){
+    st.innerHTML=errHtml('AI 小助手狀態暫時無法讀取：'+(e.message||'連線失敗'));
+  });
+
+  apiJson('/api/assistant/report').then(function(x){
+    if(!x || x.report_ready===false || !x.data){
+      rp.innerHTML='<div class="battle-note">尚未產生晨報。06:30 排程完成後，這裡才會顯示正式晨報；開啟頁面本身不會啟動重型晨報運算。</div>';
+      return;
+    }
+    var r=x.data||{}, s=r.summary||{};
     var strong=(s.strong_industries||[]).join('、')||'資料整理中';
     var weak=(s.weak_industries||[]).join('、')||'資料整理中';
     rp.innerHTML='<div class="battle-action">'+(s.taiwan_market||'資料整理中')+'</div>'+
@@ -1415,8 +1435,7 @@ function loadAiHelper(){
       '<div class="battle-note battle-risk">'+(s.main_risk||'目前無重大新增風險')+'</div>'+
       '<div class="battle-note">'+(s.assistant_note||'')+'</div>';
   }).catch(function(e){
-    st.innerHTML=errHtml('AI 小助手狀態讀取失敗：'+e.message);
-    rp.innerHTML=errHtml('晨報讀取失敗');
+    rp.innerHTML=errHtml('晨報暫時無法讀取：'+(e.message||'連線失敗'));
   });
 }
 setTimeout(loadAiHelper, 200);
