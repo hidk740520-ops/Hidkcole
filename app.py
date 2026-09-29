@@ -4823,6 +4823,59 @@ def api_assistant_review():
     return jsonify({"status": 200, "data": ai_capability_review()})
 
 
+@app.route("/api/assistant/test_email", methods=["POST"])
+def api_assistant_test_email():
+    """輕量 SMTP 測試：只驗證寄信，不建立晨報、不抓市場資料。"""
+    supplied = request.headers.get("X-Assistant-Token", "") or request.args.get("token", "")
+    if AI_SCHEDULER_TOKEN:
+        if supplied != AI_SCHEDULER_TOKEN:
+            return jsonify({"status": 403, "msg": "排程驗證失敗"}), 403
+    elif request.remote_addr not in ("127.0.0.1", "::1"):
+        return jsonify({"status": 403, "msg": "雲端使用前請先設定 AI_SCHEDULER_TOKEN"}), 403
+
+    if not REPORT_EMAIL:
+        return jsonify({"status": 400, "sent": False, "msg": "未設定 REPORT_EMAIL"}), 400
+    if not SMTP_USER or not SMTP_PASSWORD:
+        return jsonify({"status": 400, "sent": False, "msg": "未設定 SMTP_USER / SMTP_PASSWORD"}), 400
+
+    now = datetime.now(ZoneInfo("Asia/Taipei"))
+    subject = f"台股分析系統｜測試信｜{now.strftime('%Y-%m-%d %H:%M:%S')}"
+    body = (
+        "這是一封 SMTP 連線測試信。\n\n"
+        "若你收到這封信，代表 Render → Gmail SMTP 的登入與寄送流程正常。\n"
+        "這次測試沒有執行 AI 晨報、沒有抓市場資料，也不會啟動大型模型運算。\n"
+        f"系統版本：{SYSTEM_VERSION}\n"
+        f"規則版本：{CORE_RULESET_VERSION}\n"
+        f"測試時間：{now.strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）\n"
+    )
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_USER
+    msg["To"] = REPORT_EMAIL
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, [REPORT_EMAIL], msg.as_string())
+        return jsonify({
+            "status": 200,
+            "sent": True,
+            "msg": "測試信已送出",
+            "to": REPORT_EMAIL,
+            "tested_at": now.isoformat(timespec="seconds"),
+            "version": SYSTEM_VERSION,
+        })
+    except Exception as e:
+        return jsonify({
+            "status": 500,
+            "sent": False,
+            "msg": "測試信寄送失敗",
+            "reason": str(e),
+        }), 500
+
+
 @app.route("/api/assistant/run_daily", methods=["POST"])
 def api_assistant_run_daily():
     # 對外排程端點必須設定 token；本機未設定 token 時只允許 loopback。
