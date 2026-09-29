@@ -4112,9 +4112,6 @@ def get_top_institutional():
 # ===========================================================================
 
 import sqlite3
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 
 AI_DB_PATH = Path(os.environ.get("AI_ASSISTANT_DB", "ai_assistant.sqlite3"))
@@ -4125,10 +4122,9 @@ AI_MIN_REVIEW_TRADING_DAYS = int(os.environ.get("AI_MIN_REVIEW_TRADING_DAYS", "1
 AI_MIN_VALIDATED_SAMPLES = int(os.environ.get("AI_MIN_VALIDATED_SAMPLES", "60"))
 AI_SCHEDULER_TOKEN = os.environ.get("AI_SCHEDULER_TOKEN", "").strip()
 REPORT_EMAIL = os.environ.get("REPORT_EMAIL", "").strip()
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER", "").strip()
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+RESEND_FROM = os.environ.get("RESEND_FROM", "台股分析系統 <onboarding@resend.dev>").strip()
+RESEND_API_URL = "https://api.resend.com/emails"
 ENABLE_INTERNAL_SCHEDULER = os.environ.get("ENABLE_INTERNAL_SCHEDULER", "0").strip() == "1"
 
 _AI_DB_LOCK = threading.Lock()
@@ -4761,29 +4757,79 @@ def ai_report_html(report):
     </body></html>"""
 
 
-def ai_send_report_email(report):
+def _send_email_via_resend(subject, html=None, text=None):
+    """透過 Resend HTTPS API 寄信；Render Free 不使用 SMTP。"""
     if not REPORT_EMAIL:
         return {"sent": False, "reason": "未設定 REPORT_EMAIL"}
-    if not SMTP_USER or not SMTP_PASSWORD:
-        return {"sent": False, "reason": "未設定 SMTP_USER / SMTP_PASSWORD（Gmail 建議使用應用程式密碼）"}
-    subject = f"台股 AI 小助手晨報｜{report.get('report_date')}｜{(report.get('summary') or {}).get('taiwan_market','')}"
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject; msg["From"] = SMTP_USER; msg["To"] = REPORT_EMAIL
-    msg.attach(MIMEText("請使用支援 HTML 的郵件程式閱讀台股 AI 小助手晨報。", "plain", "utf-8"))
-    msg.attach(MIMEText(ai_report_html(report), "html", "utf-8"))
+    if not RESEND_API_KEY:
+        return {"sent": False, "reason": "未設定 RESEND_API_KEY"}
+
+    payload = {
+        "from": RESEND_FROM,
+        "to": [REPORT_EMAIL],
+        "subject": subject,
+    }
+    if html:
+        payload["html"] = html
+    if text:
+        payload["text"] = text
+    if not html and not text:
+        payload["text"] = "台股分析系統通知"
+
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.starttls(); server.login(SMTP_USER, SMTP_PASSWORD); server.sendmail(SMTP_USER, [REPORT_EMAIL], msg.as_string())
+        resp = requests.post(
+            RESEND_API_URL,
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": (resp.text or "")[:500]}
+
+        if 200 <= resp.status_code < 300:
+            return {
+                "sent": True,
+                "to": REPORT_EMAIL,
+                "provider": "resend",
+                "id": data.get("id") if isinstance(data, dict) else None,
+            }
+
+        message = None
+        if isinstance(data, dict):
+            message = data.get("message") or data.get("error") or data.get("name")
+        return {
+            "sent": False,
+            "provider": "resend",
+            "status_code": resp.status_code,
+            "reason": message or f"Resend API HTTP {resp.status_code}",
+            "detail": data if isinstance(data, dict) else None,
+        }
+    except requests.RequestException as e:
+        return {"sent": False, "provider": "resend", "reason": f"HTTPS 連線失敗：{e}"}
+
+
+def ai_send_report_email(report):
+    subject = f"台股 AI 小助手晨報｜{report.get('report_date')}｜{(report.get('summary') or {}).get('taiwan_market','')}"
+    result = _send_email_via_resend(
+        subject=subject,
+        html=ai_report_html(report),
+        text="請使用支援 HTML 的郵件程式閱讀台股 AI 小助手晨報。",
+    )
+    if result.get("sent"):
         with _AI_DB_LOCK:
             conn = _ai_db()
             try:
                 conn.execute("UPDATE assistant_daily_reports SET emailed_at=? WHERE report_date=?",
                              (datetime.now(ZoneInfo("Asia/Taipei")).isoformat(timespec="seconds"), report.get("report_date")))
                 conn.commit()
-            finally: conn.close()
-        return {"sent": True, "to": REPORT_EMAIL}
-    except Exception as e:
-        return {"sent": False, "reason": str(e)}
+            finally:
+                conn.close()
+    return result
 
 
 def ai_run_daily(force=False, send_email=True):
@@ -4805,7 +4851,8 @@ def api_assistant_status():
                     "permission_level": _ai_meta_get("permission_level", "L0"),
                     "start_date": _ai_meta_get("start_date"),
                     "schedule": f"台灣交易日 {AI_REPORT_HOUR:02d}:{AI_REPORT_MINUTE:02d}",
-                    "email_configured": bool(REPORT_EMAIL and SMTP_USER and SMTP_PASSWORD),
+                    "email_configured": bool(REPORT_EMAIL and RESEND_API_KEY),
+                    "email_provider": "resend" if RESEND_API_KEY else "未設定",
                     "learning": _ai_learning_stats(), "capability_review": ai_capability_review(),
                     "opportunity_module": _ai_opportunity_module(_ai_meta_get("permission_level", "L0"))})
 
@@ -4835,7 +4882,7 @@ def api_assistant_review():
 
 @app.route("/api/assistant/test_email", methods=["POST"])
 def api_assistant_test_email():
-    """輕量 SMTP 測試：只驗證寄信，不建立晨報、不抓市場資料。"""
+    """輕量 Resend HTTPS API 測試：只驗證寄信，不建立晨報、不抓市場資料。"""
     supplied = request.headers.get("X-Assistant-Token", "") or request.args.get("token", "")
     if AI_SCHEDULER_TOKEN:
         if supplied != AI_SCHEDULER_TOKEN:
@@ -4845,45 +4892,34 @@ def api_assistant_test_email():
 
     if not REPORT_EMAIL:
         return jsonify({"status": 400, "sent": False, "msg": "未設定 REPORT_EMAIL"}), 400
-    if not SMTP_USER or not SMTP_PASSWORD:
-        return jsonify({"status": 400, "sent": False, "msg": "未設定 SMTP_USER / SMTP_PASSWORD"}), 400
+    if not RESEND_API_KEY:
+        return jsonify({"status": 400, "sent": False, "msg": "未設定 RESEND_API_KEY"}), 400
 
     now = datetime.now(ZoneInfo("Asia/Taipei"))
-    subject = f"台股分析系統｜測試信｜{now.strftime('%Y-%m-%d %H:%M:%S')}"
+    subject = f"台股分析系統｜Resend 測試信｜{now.strftime('%Y-%m-%d %H:%M:%S')}"
     body = (
-        "這是一封 SMTP 連線測試信。\n\n"
-        "若你收到這封信，代表 Render → Gmail SMTP 的登入與寄送流程正常。\n"
+        "這是一封 HTTPS Email API 測試信。\n\n"
+        "若你收到這封信，代表 Render → Resend → 收件信箱 的寄送流程正常。\n"
         "這次測試沒有執行 AI 晨報、沒有抓市場資料，也不會啟動大型模型運算。\n"
         f"系統版本：{SYSTEM_VERSION}\n"
         f"規則版本：{CORE_RULESET_VERSION}\n"
         f"測試時間：{now.strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）\n"
     )
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = SMTP_USER
-    msg["To"] = REPORT_EMAIL
-    msg.attach(MIMEText(body, "plain", "utf-8"))
-
-    try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, [REPORT_EMAIL], msg.as_string())
-        return jsonify({
-            "status": 200,
-            "sent": True,
-            "msg": "測試信已送出",
-            "to": REPORT_EMAIL,
-            "tested_at": now.isoformat(timespec="seconds"),
-            "version": SYSTEM_VERSION,
-        })
-    except Exception as e:
-        return jsonify({
-            "status": 500,
-            "sent": False,
-            "msg": "測試信寄送失敗",
-            "reason": str(e),
-        }), 500
+    result = _send_email_via_resend(subject=subject, text=body)
+    code = 200 if result.get("sent") else 502
+    return jsonify({
+        "status": code,
+        "sent": bool(result.get("sent")),
+        "msg": "測試信已送出" if result.get("sent") else "測試信寄送失敗",
+        "provider": "resend",
+        "to": REPORT_EMAIL,
+        "from": RESEND_FROM,
+        "tested_at": now.isoformat(timespec="seconds"),
+        "version": SYSTEM_VERSION,
+        "provider_id": result.get("id"),
+        "reason": result.get("reason"),
+        "provider_status": result.get("status_code"),
+    }), code
 
 
 @app.route("/api/assistant/run_daily", methods=["POST"])
