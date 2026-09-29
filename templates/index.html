@@ -193,7 +193,6 @@ tr:last-child td{border-bottom:none}
   </section>
   <section class="tab-panel" data-panel="tech">
     <div class="card"><div class="card-title"><span class="icon">📈</span>技術</div><div class="card-body" id="techBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
-    <div class="card" style="margin-top:12px"><div class="card-title"><span class="icon">🚦</span>策略細節</div><div class="card-body" id="strategyBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
   </section>
   <section class="tab-panel" data-panel="chip">
     <div class="card"><div class="card-title"><span class="icon">💰</span>籌碼</div><div class="card-body" id="chipBody"><div class="placeholder">輸入股票代號開始健診</div></div></div>
@@ -360,7 +359,7 @@ function doSearch() {
   };
 
   // 顯示 loading
-  var bodies = ['battleBody','volumeBody','techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','strategyBody','valuationBody','positionBody'];
+  var bodies = ['battleBody','volumeBody','techBody','fundBody','chipBody','sectorBody','topInstBody','usBody','newsBody','verdictBody','valuationBody','positionBody'];
   bodies.forEach(function(id){
     document.getElementById(id).innerHTML = loadingHtml('載入中...');
   });
@@ -704,24 +703,54 @@ function renderVolume(){
 // ===========================================================================
 // 渲染：全部
 // ===========================================================================
-function renderAll() {
-  renderThreeCore();
-  renderMarketRules();
-  renderBattle();
-  renderVolume();
-  renderStrategy();
-  renderValuation();
-  renderPosition();
-  renderTech();
-  renderFund();
-  renderChip();
-  renderSector();
-  renderTopInst();
-  renderUS();
-  renderNews();
+function safeRender(name, fn) {
+  try { fn(); }
+  catch (e) {
+    console.error('[render] '+name+' failed:', e);
+  }
 }
 
-// --- 策略燈號（短線3~5天 / 波段2~3週）---
+function renderAll() {
+  // 每個區塊獨立渲染：單一頁籤失敗不得拖垮其他頁籤。
+  safeRender('threeCore', renderThreeCore);
+  safeRender('marketRules', renderMarketRules);
+  safeRender('battle', renderBattle);
+  safeRender('volume', renderVolume);
+  safeRender('valuation', renderValuation);
+  safeRender('position', renderPosition);
+  safeRender('tech', renderTech);
+  safeRender('fund', renderFund);
+  safeRender('chip', renderChip);
+  safeRender('sector', renderSector);
+  safeRender('topInst', renderTopInst);
+  safeRender('us', renderUS);
+  safeRender('news', renderNews);
+}
+
+// --- 估值（只呈現可解讀資訊，不製造假精準）---
+function renderValuation() {
+  var el = document.getElementById('valuationBody');
+  if (!el) return;
+  var m = G.techData && G.techData.fundamentalModel;
+  var v = m && m.valuation_expectation;
+  if (!v) {
+    el.innerHTML = '<div class="placeholder">估值資料不足；缺資料不補分。</div>';
+    return;
+  }
+  var html = '<table>';
+  html += '<tr><th>目前估值判斷</th><td><b>' + escapeHtml(v.label || '資料不足') + '</b></td></tr>';
+  if (v.pe != null) html += '<tr><th>本益比 P/E</th><td class="mono">' + fmt(v.pe,2) + '</td></tr>';
+  if (v.pb != null) html += '<tr><th>股價淨值比 P/B</th><td class="mono">' + fmt(v.pb,2) + '</td></tr>';
+  if (v.dividend_yield != null) html += '<tr><th>殖利率</th><td class="mono">' + fmt(v.dividend_yield,2) + '%</td></tr>';
+  if (v.expectation_gap_label) html += '<tr><th>成長與估值落差</th><td>' + escapeHtml(v.expectation_gap_label) + '</td></tr>';
+  html += '</table>';
+  if (v.summary) html += '<div class="battle-note"><b>白話說明：</b>' + escapeHtml(v.summary) + '</div>';
+  if (v.risks && v.risks.length) html += '<div class="battle-note battle-risk"><b>估值風險：</b>' + v.risks.map(escapeHtml).join('；') + '</div>';
+  html += '<div style="font-size:.75rem;color:var(--text-dim);margin-top:8px">估值只作為進場價格與風險參考，不單獨決定買賣；缺少可靠資料時直接標示資料不足。</div>';
+  el.innerHTML = html;
+}
+
+// --- 持股價格分析 ---
 function renderPosition() {
   var el = document.getElementById('positionBody');
   var p = G.techData && G.techData.position;
