@@ -48,7 +48,7 @@ import threading
 from pathlib import Path
 
 app = Flask(__name__)
-# V2.9.2 資源治理：避免 JSON 回應輸出非必要空白，降低序列化與傳輸負擔。
+# V2.9.3 資源治理：避免 JSON 回應輸出非必要空白，降低序列化與傳輸負擔。
 app.config["JSON_AS_ASCII"] = False
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_CONTENT_LENGTH", str(2 * 1024 * 1024)))
 FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
@@ -56,8 +56,8 @@ FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 # ===========================================================================
 # V2.8.2 持股輸入體驗整合版標記
 # ===========================================================================
-SYSTEM_VERSION = "2.9.2"
-MODEL_VERSION = "V2.9.2-startup-slim"
+SYSTEM_VERSION = "2.9.4"
+MODEL_VERSION = "V2.9.4-rule-audit"
 RELEASE_STAGE = "啟動瘦身與資源治理版"
 
 
@@ -187,8 +187,9 @@ def _quota_allows_request():
 # 證券交易稅：賣出市值 × 0.3%
 # 券商手續費：買進／賣出市值 × 0.1425%（未計券商折讓）
 # 台股 1 張 = 1,000 股；金額採無條件捨去到元。
-TRADING_TAX_RATE = 0.003
-BROKER_FEE_RATE = 0.001425
+TRADING_TAX_RATE = float(os.environ.get("STOCK_TRADING_TAX_RATE", "0.003"))
+DAY_TRADE_TAX_RATE = float(os.environ.get("DAY_TRADE_TAX_RATE", "0.0015"))
+BROKER_FEE_RATE = float(os.environ.get("BROKER_FEE_RATE", "0.001425"))
 SHARES_PER_LOT = 1000
 
 
@@ -198,7 +199,8 @@ def calculate_trade_costs(price, lots, side):
         return {"market_value": None, "fee": 0, "tax": 0, "total_cost": 0}
     market_value = math.floor(float(price) * float(lots) * SHARES_PER_LOT)
     fee = math.floor(market_value * BROKER_FEE_RATE)
-    tax = math.floor(market_value * TRADING_TAX_RATE) if side == "sell" else 0
+    tax_rate = DAY_TRADE_TAX_RATE if day_trade else TRADING_TAX_RATE
+    tax = math.floor(market_value * tax_rate) if side == "sell" else 0
     return {
         "market_value": market_value,
         "fee": fee,
@@ -1911,7 +1913,7 @@ def _yahoo_raw_value(obj, key, default=None):
 
 def fetch_company_fundamentals(stock_id, meta=None):
     """
-    V2.9.2 輕量公司資料來源：直接使用 Yahoo 公開 JSON，不載入 yfinance。
+    V2.9.3 輕量公司資料來源：直接使用 Yahoo 公開 JSON，不載入 yfinance。
     目的：保留主要基本面／估值欄位，同時減少部署套件與執行記憶體。
     三表細項若來源未提供，交由 coverage/limitations 降級，不硬補資料。
     """
@@ -2302,6 +2304,56 @@ TWSE_RULE_SOURCES = {
 }
 
 
+_MARKET_HOLIDAY_CACHE = {"year": None, "holidays": set(), "ts": 0.0, "verified": False}
+
+
+def _fetch_twse_market_holidays(year):
+    """TWSE 官方休市日曆；抓取失敗時標記未驗證。"""
+    now_ts = time.time()
+    if (_MARKET_HOLIDAY_CACHE.get("year") == year and
+            now_ts - _MARKET_HOLIDAY_CACHE.get("ts", 0) < 7 * 86400):
+        return set(_MARKET_HOLIDAY_CACHE.get("holidays") or set()), bool(_MARKET_HOLIDAY_CACHE.get("verified"))
+    holidays = set()
+    verified = False
+    try:
+        roc_year = year - 1911
+        r = requests.get(
+            "https://www.twse.com.tw/rwd/zh/holidaySchedule/holidaySchedule",
+            params={"response": "json", "queryYear": str(roc_year)},
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=8,
+        )
+        j = r.json() if r.status_code == 200 else {}
+        for row in (j.get("data") or []):
+            if not row:
+                continue
+            raw = str(row[0]).strip().replace("/", "-")
+            candidates = []
+            if "月" in raw and "日" in raw:
+                try:
+                    m = int(raw.split("月")[0].split()[-1])
+                    d = int(raw.split("月")[1].split("日")[0])
+                    candidates.append(f"{year:04d}-{m:02d}-{d:02d}")
+                except Exception:
+                    pass
+            parts = [x for x in raw.replace("年", "-").replace("月", "-").replace("日", "").split("-") if x]
+            try:
+                if len(parts) >= 3:
+                    yy, mm, dd = int(parts[-3]), int(parts[-2]), int(parts[-1])
+                    if yy < 1911:
+                        yy += 1911
+                    candidates.append(f"{yy:04d}-{mm:02d}-{dd:02d}")
+                elif len(parts) == 2:
+                    candidates.append(f"{year:04d}-{int(parts[0]):02d}-{int(parts[1]):02d}")
+            except Exception:
+                pass
+            holidays.update(candidates)
+        verified = isinstance(j.get("data"), list)
+    except Exception:
+        verified = False
+    _MARKET_HOLIDAY_CACHE.update({"year": year, "holidays": holidays, "ts": now_ts, "verified": verified})
+    return holidays, verified
+
+
 def _taipei_market_clock():
     try:
         from zoneinfo import ZoneInfo
@@ -2309,24 +2361,37 @@ def _taipei_market_clock():
     except Exception:
         now = datetime.now()
     hhmm = now.hour * 60 + now.minute
-    weekday = now.weekday()  # 0=Mon
+    weekday = now.weekday()
+    holidays, holiday_verified = _fetch_twse_market_holidays(now.year)
+    today = now.date().isoformat()
     if weekday >= 5:
-        session = "非交易日（週末；國定/交易所休市仍須另以官方日曆確認）"
+        code, session = "CLOSED", "非交易日（週末）"
+    elif holiday_verified and today in holidays:
+        code, session = "CLOSED", "非交易日（TWSE休市）"
     elif hhmm < 8 * 60 + 30:
-        session = "盤前"
+        code, session = "PRE_MARKET", "盤前"
     elif hhmm < 9 * 60:
-        session = "盤前委託時段"
-    elif hhmm <= 13 * 60 + 30:
-        session = "集中市場交易中"
+        code, session = "ORDER_ENTRY", "一般交易委託時段（尚未撮合）"
+    elif hhmm < 13 * 60 + 30:
+        code, session = "REGULAR", "集中市場交易中"
+    elif hhmm < 13 * 60 + 40:
+        code, session = "POST_REGULAR_GAP", "一般交易已收盤／等待盤後零股"
+    elif hhmm < 14 * 60:
+        code, session = "ODD_LOT_AFTER_HOURS", "盤後零股委託時段"
     elif hhmm < 14 * 60 + 30:
-        session = "盤後時段"
+        code, session = "AFTER_HOURS", "盤後定價＋盤後零股時段"
     else:
-        session = "收盤後"
-    return {"time": now.strftime("%Y-%m-%d %H:%M:%S"), "session": session, "weekday": weekday}
+        code, session = "POST_CLOSE", "收盤後"
+    return {
+        "time": now.strftime("%Y-%m-%d %H:%M:%S"), "date": today,
+        "session": session, "code": code, "weekday": weekday,
+        "holiday_calendar_verified": holiday_verified,
+        "is_trading_day": code != "CLOSED",
+    }
 
 
 def build_taiwan_market_rule_engine(reference_price, close, stock_id, meta=None, special_status=None,
-                                    opening_reference=None, no_price_limit=False):
+                                    opening_reference=None, no_price_limit=False, official_limits=None):
     """建立台股硬規則校驗層。special_status 若無官方資料則保持『未自動驗證』。"""
     meta = meta or {}
     status = (special_status or "未自動驗證").strip()
@@ -2335,9 +2400,29 @@ def build_taiwan_market_rule_engine(reference_price, close, stock_id, meta=None,
 
     if no_price_limit:
         limits = {"reference": round_to_tick(ref) if ref else None, "limit_up": None, "limit_down": None,
-                  "estimated": False, "no_limit": True}
+                  "estimated": False, "no_limit": True, "source": "special_rule"}
+    elif official_limits and official_limits.get("available"):
+        # 交易所即時欄位若已直接提供 u/w，優先採用，不自行重算。
+        off_ref = official_limits.get("reference")
+        if off_ref not in (None, ""):
+            ref = float(off_ref)
+        limits = {
+            "reference": round_to_tick(ref) if ref else None,
+            "limit_up": round_to_tick(official_limits.get("limit_up")) if official_limits.get("limit_up") is not None else None,
+            "limit_down": round_to_tick(official_limits.get("limit_down")) if official_limits.get("limit_down") is not None else None,
+            "estimated": False,
+            "source": official_limits.get("source") or "TWSE MIS",
+            "open": round_to_tick(official_limits.get("open")) if official_limits.get("open") is not None else None,
+        }
+        # 個別欄位缺失時才依官方參考價補算。
+        calc = taiwan_daily_price_limits(ref) if ref else {}
+        if limits["limit_up"] is None:
+            limits["limit_up"] = calc.get("limit_up")
+        if limits["limit_down"] is None:
+            limits["limit_down"] = calc.get("limit_down")
     else:
         limits = taiwan_daily_price_limits(ref)
+        limits["source"] = "historical_fallback"
 
     restrictions = []
     hard_block = False
@@ -2356,13 +2441,15 @@ def build_taiwan_market_rule_engine(reference_price, close, stock_id, meta=None,
     notes = []
     if special_unverified:
         notes.append("注意／處置／變更交易方法／停止交易等特殊狀態尚未由官方資料源自動驗證")
-    if opening_reference is None:
-        notes.append("開盤競價基準未取得時，以前一交易日收盤價估算一般漲跌停；特殊交易日須以交易所基準為準")
+    if official_limits and official_limits.get("available"):
+        notes.append("當日漲跌停優先採用交易所即時參考價／漲跌停欄位；今日開盤成交價僅供顯示，不直接作為法定基準。")
+    elif opening_reference is None:
+        notes.append("交易所當日參考價未取得時，才以前一交易日收盤價估算；除權息、初上市等特殊交易日須以交易所基準為準。")
     notes.append("交易所休市日與臨時制度異動應以 TWSE/TPEx 最新公告為準")
 
     confidence = 100
     if special_unverified: confidence -= 15
-    if opening_reference is None: confidence -= 10
+    if not (official_limits and official_limits.get("available")) and opening_reference is None: confidence -= 10
     confidence = max(0, confidence)
 
     return {
@@ -2376,10 +2463,15 @@ def build_taiwan_market_rule_engine(reference_price, close, stock_id, meta=None,
         "tick_size_at_close": taiwan_tick_size(close) if close else None,
         "daily_limits": limits,
         "normal_rules": {
-            "regular_session": "09:00-13:30",
-            "daily_price_limit": "一般股票以當市開盤競價基準 ±10% 為原則",
-            "tick_rule": "依股價區間套用交易所升降單位",
-            "special_exceptions": "初次上市普通股特定情況前5個交易日無一般漲跌幅限制；除權息等依官方開盤競價基準",
+            "regular_session": "一般交易委託 08:30-13:30；撮合 09:00-13:30",
+            "odd_lot_session": "盤中零股委託 09:00-13:30（09:10起撮合）；盤後零股 13:40-14:30（14:30撮合）",
+            "after_hours_session": "盤後定價委託 14:00-14:30；14:30撮合",
+            "daily_price_limit": "一般普通股以當市開盤競價基準 ±10% 為原則",
+            "tick_rule": "股票升降單位：<10=0.01；10~<50=0.05；50~<100=0.1；100~<500=0.5；500~<1000=1；>=1000=5",
+            "special_exceptions": "初次上市普通股（不含上櫃轉上市）前5個交易日無一般漲跌幅限制；除權息、減資恢復等依交易所當日開盤競價基準",
+            "lot_rule": "一般股票整張 1,000 股；零股 1~999 股",
+            "tax_rule": "一般股票賣出證交稅 0.3%；符合現股當沖規定之賣出稅率 0.15%（現行優惠至2027-12-31）",
+            "broker_fee_rule": "券商手續費由券商訂定；系統預設基準 0.1425%，可用環境變數覆寫",
         },
         "notes": notes,
         "sources": TWSE_RULE_SOURCES,
@@ -2433,6 +2525,163 @@ def apply_taiwan_market_rule_guard(v28, market_rules, policy_env=None):
     v28["market_rules"] = market_rules
     v28["policy_environment"] = policy_env or {}
     return v28
+
+
+_TWSE_STATUS_CACHE = {"ts": 0.0, "data": {}}
+_TWSE_STATUS_TTL = 900
+
+
+def _row_stock_code(row):
+    for k in ("Code", "證券代號", "股票代號", "SecuritiesCompanyCode"):
+        v = row.get(k) if isinstance(row, dict) else None
+        if v not in (None, ""):
+            return str(v).strip()
+    if isinstance(row, dict):
+        for k, v in row.items():
+            if ("代號" in str(k) or str(k).lower() == "code") and v not in (None, ""):
+                return str(v).strip()
+    return ""
+
+
+def fetch_twse_special_status(stock_id, meta=None):
+    """TWSE 官方 OpenAPI：注意／處置／暫停交易／變更交易方法。上櫃股仍標記待 TPEx 驗證。"""
+    market = str((meta or {}).get("market") or "")
+    if "上櫃" in market or "OTC" in market.upper():
+        return {"status": "未自動驗證", "verified": False, "source": "TPEx待介接", "details": []}
+    now_ts = time.time()
+    if now_ts - _TWSE_STATUS_CACHE.get("ts", 0) > _TWSE_STATUS_TTL or not _TWSE_STATUS_CACHE.get("data"):
+        datasets = {
+            "注意": "https://openapi.twse.com.tw/v1/announcement/notice",
+            "處置": "https://openapi.twse.com.tw/v1/announcement/punish",
+            "停止交易": "https://openapi.twse.com.tw/v1/exchangeReport/TWTAWU",
+            "變更交易方法": "https://openapi.twse.com.tw/v1/exchangeReport/TWT85U",
+        }
+        status_map = {}
+        any_verified = False
+        for label, url in datasets.items():
+            try:
+                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
+                rows = r.json() if r.status_code == 200 else []
+                if isinstance(rows, list):
+                    any_verified = True
+                    for row in rows:
+                        code = _row_stock_code(row)
+                        if not code:
+                            continue
+                        status_map.setdefault(code, []).append({"label": label, "row": row})
+            except Exception:
+                continue
+        _TWSE_STATUS_CACHE.update({"ts": now_ts, "data": status_map, "verified": any_verified})
+    matches = (_TWSE_STATUS_CACHE.get("data") or {}).get(str(stock_id), [])
+    labels = [m.get("label") for m in matches if m.get("label")]
+    if "停止交易" in labels:
+        status = "停止交易"
+    elif "處置" in labels:
+        status = "處置"
+    elif "變更交易方法" in labels:
+        status = "變更交易方法"
+    elif "注意" in labels:
+        status = "注意"
+    else:
+        status = "正常" if _TWSE_STATUS_CACHE.get("verified") else "未自動驗證"
+    return {
+        "status": status,
+        "verified": bool(_TWSE_STATUS_CACHE.get("verified")),
+        "source": "TWSE OpenAPI",
+        "details": matches[:4],
+    }
+
+
+_TWSE_REALTIME_CACHE = {}
+_TWSE_REALTIME_TTL = 20
+
+
+def _twse_num(v):
+    """TWSE MIS 即時欄位字串轉數字；'-' / 空值回傳 None。"""
+    try:
+        if v in (None, "", "-", "--"):
+            return None
+        return float(str(v).replace(",", "").strip())
+    except Exception:
+        return None
+
+
+def fetch_twse_realtime_limits(stock_id, meta=None):
+    """優先取得交易所即時個股的當日參考價／漲停／跌停。
+
+    TWSE MIS 回傳欄位中：
+      y = 參考價（一般日通常為前一日收盤；特殊交易日依交易所基準）
+      u = 當日漲停價
+      w = 當日跌停價
+      o = 今日第一筆成交／開盤價（僅供顯示，不作漲跌停基準）
+
+    目的：避免用 FinMind 歷史資料的「上一列收盤」誤當今天交易所基準。
+    失敗時回傳 available=False，後續才使用歷史資料估算。
+    """
+    now = time.time()
+    cached = _TWSE_REALTIME_CACHE.get(str(stock_id))
+    if cached and now - cached[0] < _TWSE_REALTIME_TTL:
+        return cached[1]
+
+    market = str((meta or {}).get("market") or "")
+    # 上櫃先試 otc；上市先試 tse；不確定則兩者都試。
+    if "上櫃" in market or "OTC" in market.upper():
+        prefixes = ["otc", "tse"]
+    else:
+        prefixes = ["tse", "otc"]
+
+    result = {"available": False, "source": "TWSE MIS"}
+    for prefix in prefixes:
+        try:
+            ex_ch = f"{prefix}_{stock_id}.tw"
+            r = requests.get(
+                "https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
+                params={"ex_ch": ex_ch, "json": "1", "delay": "0"},
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://mis.twse.com.tw/stock/fibest.jsp",
+                },
+                timeout=6,
+            )
+            if r.status_code != 200:
+                continue
+            j = r.json()
+            rows = j.get("msgArray") or []
+            if not rows:
+                continue
+            q = rows[0] or {}
+            ref = _twse_num(q.get("y"))
+            up = _twse_num(q.get("u"))
+            down = _twse_num(q.get("w"))
+            op = _twse_num(q.get("o"))
+            last = _twse_num(q.get("z"))
+            high = _twse_num(q.get("h"))
+            low = _twse_num(q.get("l"))
+            volume = _twse_num(q.get("v"))
+            if ref is None and up is None and down is None and last is None:
+                continue
+            result = {
+                "available": True,
+                "source": "TWSE MIS",
+                "market_channel": prefix,
+                "reference": ref,
+                "limit_up": up,
+                "limit_down": down,
+                "open": op,
+                "last": last,
+                "high": high,
+                "low": low,
+                "volume": volume,
+                "name": q.get("n") or q.get("nf") or "",
+                "time": q.get("t") or "",
+                "date": q.get("d") or "",
+            }
+            break
+        except Exception:
+            continue
+
+    _TWSE_REALTIME_CACHE[str(stock_id)] = (now, result)
+    return result
 
 
 def taiwan_tick_size(price):
@@ -2497,6 +2746,48 @@ def _clip_price_to_limits(price, limits):
     if lo is not None: p = max(p, float(lo))
     if hi is not None: p = min(p, float(hi))
     return round_to_tick(p)
+
+
+def reconcile_v27_with_market_rules(v27, market_rules, live_quote=None):
+    """以交易所當日官方價格限制重新校正作戰卡，避免舊基準殘留。"""
+    if not isinstance(v27, dict) or v27.get("error"):
+        return v27
+    plan = v27.get("price_plan") or {}
+    limits = dict((market_rules or {}).get("daily_limits") or {})
+    if limits:
+        for key in ("entry_zone", "add_zone"):
+            z = plan.get(key) or {}
+            if z.get("low") is not None:
+                z["low"] = _clip_price_to_limits(z.get("low"), limits)
+            if z.get("high") is not None:
+                z["high"] = _clip_price_to_limits(z.get("high"), limits)
+            plan[key] = z
+        for key in ("defense", "stop_loss", "target_1", "target_2"):
+            if plan.get(key) is not None:
+                plan[key] = _clip_price_to_limits(plan.get(key), limits)
+        plan["daily_limits"] = limits
+        base = None
+        if live_quote and live_quote.get("last") is not None:
+            base = float(live_quote["last"])
+        if base is not None and base > 0:
+            vals = []
+            for k in ("target_1", "target_2"):
+                t = plan.get(k)
+                if t is not None and float(t) > base:
+                    vals.append((float(t) / base - 1) * 100)
+            plan["remaining_upside_pct"] = ({"low": round(min(vals), 1), "high": round(max(vals), 1)} if vals else None)
+    v27["price_plan"] = plan
+    v27["price_context"] = {
+        "current_price": (live_quote or {}).get("last"),
+        "open": (live_quote or {}).get("open"),
+        "high": (live_quote or {}).get("high"),
+        "low": (live_quote or {}).get("low"),
+        "quote_time": (live_quote or {}).get("time"),
+        "quote_date": (live_quote or {}).get("date"),
+        "session": (market_rules or {}).get("session"),
+        "source": (live_quote or {}).get("source"),
+    }
+    return v27
 
 
 def classify_market_regime(close, ma20, ma60, atr14):
@@ -3056,6 +3347,7 @@ def get_stock_data():
             position = None
 
     # --- V2.8.0 正式穩定決策融合層：作戰卡只吃這一份輸出 ---
+    official_limits = {}
     try:
         v27 = build_v27_analysis(
             df, latest, prev, score_pct, decision, position, weekly_kd, revenue_yoy, valuation, meta, kd_cross
@@ -3066,11 +3358,22 @@ def get_stock_data():
         v27 = apply_v28_stability_gate(v27, three_core)
         # V2.8.1：臺灣市場制度硬規則高於模型；政策層沒有可驗證事件時維持中性。
         reference_price_rule = float(prev["Close"]) if prev is not None and prev["Close"] is not None else float(latest["Close"])
+        # V2.9.3：漲跌停不得直接用歷史資料上一列收盤當作今天基準。
+        # 優先向交易所 MIS 取得當日參考價(y)與官方漲/跌停(u/w)；失敗才回退歷史估算。
+        official_limits = fetch_twse_realtime_limits(stock_id, meta)
+        special_info = fetch_twse_special_status(stock_id, meta)
+        opening_reference_rule = official_limits.get("reference") if official_limits.get("available") else None
         market_rules = build_taiwan_market_rule_engine(
-            reference_price_rule, float(latest["Close"]), stock_id, meta=meta
+            reference_price_rule, float(latest["Close"]), stock_id, meta=meta,
+            special_status=special_info.get("status"),
+            opening_reference=opening_reference_rule, official_limits=official_limits
         )
+        market_rules["special_status_verified"] = special_info.get("verified")
+        market_rules["special_status_source"] = special_info.get("source")
+        market_rules["special_status_details"] = special_info.get("details") or []
         policy_env = build_policy_environment(meta, v27.get("market_regime"))
         v27 = apply_taiwan_market_rule_guard(v27, market_rules, policy_env)
+        v27 = reconcile_v27_with_market_rules(v27, market_rules, official_limits)
     except Exception as e:
         technical_core = {"score": score_pct, "label": "資料不足"}
         three_core = None
@@ -3096,6 +3399,11 @@ def get_stock_data():
         "industry": industry,
         "date": latest["Date"],
         "close": round(float(latest["Close"]), 2),
+        "current_price": (round(float(official_limits.get("last")), 2) if official_limits and official_limits.get("last") is not None else None),
+        "current_open": (round(float(official_limits.get("open")), 2) if official_limits and official_limits.get("open") is not None else None),
+        "current_high": (round(float(official_limits.get("high")), 2) if official_limits and official_limits.get("high") is not None else None),
+        "current_low": (round(float(official_limits.get("low")), 2) if official_limits and official_limits.get("low") is not None else None),
+        "market_session": ((market_rules or {}).get("session") if market_rules else None),
         "prev_close": round(prev_close, 2) if prev_close is not None else None,
         "change": price_change,
         "change_pct": price_change_pct,
@@ -3230,7 +3538,7 @@ def get_us_market():
     }
     results = []
 
-    # V2.9.2：直接使用 Yahoo JSON API，避免載入 yfinance。
+    # V2.9.3：直接使用 Yahoo JSON API，避免載入 yfinance。
     for sym, name in symbols.items():
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d"
@@ -4248,7 +4556,7 @@ def _ai_maybe_start_scheduler():
         t = threading.Thread(target=_ai_internal_scheduler_loop, name="ai-assistant-scheduler", daemon=True)
         t.start()
 
-# V2.9.2：資料庫採首次使用時初始化，避免 Gunicorn import 階段做磁碟 I/O。
+# V2.9.3：資料庫採首次使用時初始化，避免 Gunicorn import 階段做磁碟 I/O。
 _ai_maybe_start_scheduler()
 
 
