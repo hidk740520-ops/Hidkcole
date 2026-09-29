@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>台股分析系統 V2.9.2</title>
+<title>台股分析系統 V2.9.4</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -131,7 +131,7 @@ tr:last-child td{border-bottom:none}
 <!-- ===================== HEADER ===================== -->
 <div class="header">
   <div class="header-top">
-    <h1>📊 台股分析系統 <span id="systemVersionBadge" style="font-size:.72rem;color:var(--text-dim)">V2.9.2</span></h1>
+    <h1>📊 台股分析系統 <span id="systemVersionBadge" style="font-size:.72rem;color:var(--text-dim)">V2.9.4</span></h1>
     <div class="report-time" id="reportTime"></div>
   </div>
   <div class="search-bar">
@@ -491,6 +491,11 @@ function fetchTechData() {
       // 映射後端回傳格式 → 前端 G.techData 結構
       G.techData = {
         lastClose: j.close,
+        currentPrice: j.current_price,
+        currentOpen: j.current_open,
+        currentHigh: j.current_high,
+        currentLow: j.current_low,
+        marketSession: j.market_session || null,
         lastDate: j.date,
         change: j.change, changePct: j.change_pct,
         ma5: j.ma.MA5, ma10: j.ma.MA10, ma20: j.ma.MA20, ma60: j.ma.MA60,
@@ -626,16 +631,21 @@ function renderBattle(){
   html+='<div style="text-align:center;color:var(--text-dim);font-size:.78rem">目前策略</div><div class="battle-action" style="color:'+mainColor+'">'+mainLabel+'</div>';
   html+='<div class="decision-split"><div><div class="k">空手</div><div class="v">'+((d.cash&&d.cash.label)||'--')+'</div></div><div><div class="k">持股</div><div class="v">'+((d.holder&&d.holder.label)||'--')+'</div></div><div><div class="k">加碼</div><div class="v">'+(d.add_state||'--')+'</div></div></div>';
   html+='<div class="battle-grid">';
-  html+='<div class="battle-kpi"><div class="k">今日收盤</div><div class="v mono">'+fmt(t.lastClose)+'</div></div>';
-  html+='<div class="battle-kpi"><div class="k">明日全天</div><div class="v">'+(dir.label||'--')+'</div></div>';
-  html+='<div class="battle-kpi"><div class="k">明日開盤</div><div class="v">'+open.label+'</div></div>';
+  var ses=(t.marketSession&&t.marketSession.code)||'';
+  var pxLabel=(ses==='REGULAR'||ses==='ORDER_ENTRY')?'目前成交價':'最近收盤價';
+  var px=(t.currentPrice!=null?t.currentPrice:t.lastClose);
+  html+='<div class="battle-kpi"><div class="k">'+pxLabel+'</div><div class="v mono">'+fmt(px)+'</div></div>';
+  html+='<div class="battle-kpi"><div class="k">隔日方向</div><div class="v">'+(dir.label||'--')+'</div></div>';
+  html+='<div class="battle-kpi"><div class="k">隔日開盤</div><div class="v">'+open.label+'</div></div>';
   html+='<div class="battle-kpi"><div class="k">模型信心</div><div class="v mono">'+fmt(dir.confidence,0)+'/100</div></div>';
   html+='<div class="battle-kpi"><div class="k">上漲／震盪／下跌</div><div class="v mono" style="font-size:.85rem">'+fmt(dir.up_probability,1)+'% / '+fmt(dir.sideways_probability,1)+'% / '+fmt(dir.down_probability,1)+'%</div></div>';
   html+='<div class="battle-kpi"><div class="k">預估剩餘空間</div><div class="v mono">'+remain+'</div></div>';
   html+='</div>';
   var lim=p.daily_limits||{};
-  html+='<table style="margin-top:12px"><tr><th>估算漲停價</th><td class="mono pos">'+fmt(lim.limit_up)+'</td></tr><tr><th>估算跌停價</th><td class="mono neg">'+fmt(lim.limit_down)+'</td></tr><tr><th>理想進場區</th><td class="mono">'+zoneText(p.entry_zone)+'</td></tr><tr><th>加碼區</th><td class="mono">'+zoneText(p.add_zone)+'</td></tr><tr><th>防守位</th><td class="mono">'+fmt(p.defense)+'</td></tr><tr><th>停損位</th><td class="mono neg">'+fmt(p.stop_loss)+'</td></tr><tr><th>第一目標</th><td class="mono pos">'+fmt(p.target_1)+'</td></tr><tr><th>第二目標</th><td class="mono pos">'+fmt(p.target_2)+'</td></tr></table>';
-  if(lim.estimated) html+='<div style="margin-top:6px;font-size:.7rem;color:var(--text-dim)">漲跌停依一般個股 ±10% 與升降單位估算；除權息、初上市等特殊交易日以交易所開盤競價基準為準。</div>';
+  var limitPrefix=lim.estimated?'估算':'今日';
+  html+='<table style="margin-top:12px"><tr><th>'+limitPrefix+'漲停價</th><td class="mono pos">'+fmt(lim.limit_up)+'</td></tr><tr><th>'+limitPrefix+'跌停價</th><td class="mono neg">'+fmt(lim.limit_down)+'</td></tr><tr><th>理想進場區</th><td class="mono">'+zoneText(p.entry_zone)+'</td></tr><tr><th>加碼區</th><td class="mono">'+zoneText(p.add_zone)+'</td></tr><tr><th>防守位</th><td class="mono">'+fmt(p.defense)+'</td></tr><tr><th>停損位</th><td class="mono neg">'+fmt(p.stop_loss)+'</td></tr><tr><th>第一目標</th><td class="mono pos">'+fmt(p.target_1)+'</td></tr><tr><th>第二目標</th><td class="mono pos">'+fmt(p.target_2)+'</td></tr></table>';
+  if(lim.estimated) html+='<div style="margin-top:6px;font-size:.7rem;color:var(--text-dim)">交易所即時漲跌停欄位未取得，才依一般普通股 ±10% 與升降單位估算；特殊交易日仍以交易所公告為準。</div>';
+  else html+='<div style="margin-top:6px;font-size:.7rem;color:var(--text-dim)">漲跌停價採交易所當日參考價／官方即時欄位。</div>';
   html+='<div class="battle-note"><b>主要原因：</b>'+((d.reasons&&d.reasons.length)?d.reasons.join('；'):'目前訊號不足，維持等待。')+'</div>';
   html+='<div class="battle-note battle-risk"><b>主要風險：</b>'+((d.risks&&d.risks.length)?d.risks.join('；'):'目前未偵測到高優先風險否決條件。')+'</div>';
   if(d.invalidation) html+='<div class="battle-note"><b>失效條件：</b>'+d.invalidation+'</div>';
@@ -1464,7 +1474,7 @@ function runBacktest() {
 
 
 // ===========================================================================
-// V2.9.2 AI 自主分析小助手（前台只顯示必要說明；完整運算留在後台）
+// V2.9.4 AI 自主分析小助手（前台只顯示必要說明；完整運算留在後台）
 // ===========================================================================
 function loadAiHelper(){
   var st=document.getElementById('aiHelperStatus');
